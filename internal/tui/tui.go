@@ -126,7 +126,7 @@ func (m *Model) reload() {
 		if kinds[m.kind] != "" && c.Kind != kinds[m.kind] {
 			continue
 		}
-		if m.filter != "" && !strings.Contains(book.Fold(c.Alias+" "+c.Name+" "+c.Org+" "+strings.Join(c.Tags, " ")), book.Fold(m.filter)) {
+		if m.filter != "" && !strings.Contains(book.Fold(strings.Join(c.AllAliases(), " ")+" "+c.Name+" "+c.Org+" "+strings.Join(c.Tags, " ")), book.Fold(m.filter)) {
 			continue
 		}
 		keep = append(keep, c)
@@ -283,7 +283,7 @@ func (m *Model) complete(q string) []tuikit.Item {
 	var out []tuikit.Item
 	fq := book.Fold(q)
 	for _, c := range m.all {
-		if fq == "" || strings.Contains(book.Fold(c.Alias+" "+c.Name), fq) {
+		if fq == "" || strings.Contains(book.Fold(strings.Join(c.AllAliases(), " ")+" "+c.Name), fq) {
 			out = append(out, tuikit.Item{Value: c.Alias, Label: c.Alias + " · " + c.Name})
 		}
 	}
@@ -545,6 +545,7 @@ func (m *Model) detail(width int) []string {
 	for i, e := range c.Emails {
 		row(map[bool]string{true: "e-mails", false: ""}[i == 0], e)
 	}
+	row("alias", strings.Join(c.Aliases, ", "))
 	row("membres", strings.Join(c.Members, ", "))
 	row("groupes", strings.Join(c.Groups, ", "))
 	row("tags", strings.Join(c.Tags, ", "))
@@ -559,15 +560,15 @@ func (m *Model) detail(width int) []string {
 	if m.full && m.shown != nil {
 		for _, v := range m.shown.Views {
 			out = append(out, "", sSection.Render(v.Label))
-			switch {
-			case v.Error != "":
+			if v.Error != "" {
 				out = append(out, sError.Render(truncate(v.Error, width)))
-			case v.Text != "":
-				for _, l := range strings.Split(v.Text, "\n") {
-					out = append(out, truncate(l, width))
+			}
+			for _, r := range v.Rows {
+				l := r.Text
+				if l == "" {
+					l = string(r.Item)
 				}
-			case len(v.Result) > 0:
-				out = append(out, truncate(string(v.Result), width))
+				out = append(out, truncate(l, width))
 			}
 		}
 	} else if !m.full {

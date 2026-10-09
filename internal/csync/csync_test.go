@@ -309,3 +309,24 @@ func TestRemovedCardForgetsLink(t *testing.T) {
 		t.Fatalf("the address book keeps its card, the link goes: %+v", rep)
 	}
 }
+
+func TestOtherAliases(t *testing.T) {
+	y, f, s := setup(t)
+	save(t, s, &store.Contact{Alias: "EC", Aliases: []string{"EVE"}, Kind: store.Person, Name: "Eve Clément"})
+	save(t, s, &store.Contact{Alias: "FAM", Kind: store.Group, Name: "Famille", Members: []string{"EVE"}})
+	run(t, y)
+	ec := get(t, s, "EC")
+	if g := f.groups[get(t, s, "FAM").Remote]; g == nil || len(g.Members) != 1 || g.Members[0] != ec.Remote {
+		t.Fatalf("a member named by another alias joins the group: %+v", g)
+	}
+	// The main alias changes: the link follows, no second card is created.
+	if err := s.Remove("EC"); err != nil {
+		t.Fatal(err)
+	}
+	ec.Alias, ec.Aliases = "EVE", []string{"EC"}
+	save(t, s, ec)
+	rep := run(t, y)
+	if len(f.cards) != 1 || rep.Linked != 2 {
+		t.Fatalf("rename lost the link: %d cards, %+v", len(f.cards), rep)
+	}
+}

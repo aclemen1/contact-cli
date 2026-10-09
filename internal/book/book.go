@@ -15,12 +15,13 @@ import (
 
 type Book struct {
 	Stores map[string]*store.Store
-	Cards  map[string]*store.Contact // by alias
+	Cards  map[string]*store.Contact // by main alias
+	Index  map[string]*store.Contact // by every alias, main or other
 }
 
 // Load reads every store; an alias found in two spheres is a warning, the first sphere keeps it.
 func Load(stores map[string]*store.Store, warn func(string)) (*Book, error) {
-	b := &Book{Stores: stores, Cards: map[string]*store.Contact{}}
+	b := &Book{Stores: stores, Cards: map[string]*store.Contact{}, Index: map[string]*store.Contact{}}
 	var names []string
 	for n := range stores {
 		names = append(names, n)
@@ -32,17 +33,54 @@ func Load(stores map[string]*store.Store, warn func(string)) (*Book, error) {
 			return nil, err
 		}
 		for _, c := range cs {
-			if old, ok := b.Cards[c.Alias]; ok {
+			if old := b.Index[c.Alias]; old != nil {
 				if warn != nil {
-					warn("alias " + c.Alias + " is in " + old.Sphere + " and " + c.Sphere + "; " + old.Sphere + " is used")
+					warn("alias " + c.Alias + " is in " + old.Sphere + " (" + old.Alias + ") and " + c.Sphere + "; " + old.Sphere + " is used")
 				}
 				continue
 			}
-			b.Cards[c.Alias] = c
+			for _, a := range b.Put(c) {
+				if warn != nil {
+					warn("alias " + a + " of " + c.Alias + " is already " + b.Index[a].Alias + "'s; it is ignored")
+				}
+			}
 		}
 	}
 	b.computeGroups()
 	return b, nil
+}
+
+// Put adds a card under all its aliases and returns those another card already holds.
+func (b *Book) Put(c *store.Contact) (taken []string) {
+	if b.Index == nil {
+		b.Index = map[string]*store.Contact{}
+	}
+	b.Cards[c.Alias] = c
+	b.Index[c.Alias] = c
+	for _, a := range c.Aliases {
+		if o := b.Index[a]; o != nil && o != c {
+			taken = append(taken, a)
+			continue
+		}
+		b.Index[a] = c
+	}
+	return taken
+}
+
+// Lookup finds a card by any of its aliases, already normalised.
+func (b *Book) Lookup(a string) *store.Contact {
+	if c := b.Index[a]; c != nil {
+		return c
+	}
+	return b.Cards[a]
+}
+
+// Canon gives the main alias of the card a designates, or a itself.
+func (b *Book) Canon(a string) string {
+	if c := b.Lookup(a); c != nil {
+		return c.Alias
+	}
+	return a
 }
 
 func (b *Book) computeGroups() {
@@ -54,7 +92,7 @@ func (b *Book) computeGroups() {
 			continue
 		}
 		for _, m := range g.Members {
-			if c := b.Cards[m]; c != nil {
+			if c := b.Lookup(m); c != nil && !contains(c.Groups, g.Alias) {
 				c.Groups = append(c.Groups, g.Alias)
 			}
 		}
@@ -77,7 +115,7 @@ func (b *Book) Get(alias string) (*store.Contact, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := b.Cards[a]
+	c := b.Lookup(a)
 	if c == nil {
 		return nil, spec.NotFound("no contact %s. Find one with: contact resolve <name>", a)
 	}
@@ -99,7 +137,7 @@ func (b *Book) Members(alias string, recursive bool) ([]*store.Contact, error) {
 	var walk func(g *store.Contact, path []string) error
 	walk = func(g *store.Contact, path []string) error {
 		for _, m := range g.Members {
-			c := b.Cards[m]
+			c := b.Lookup(m)
 			if c == nil {
 				continue
 			}
@@ -130,12 +168,14 @@ func (b *Book) Members(alias string, recursive bool) ([]*store.Contact, error) {
 
 // WouldCycle says whether adding member to group closes a cycle of groups.
 func (b *Book) WouldCycle(group, member string) bool {
+	group, member = b.Canon(group), b.Canon(member)
 	if group == member {
 		return true
 	}
 	seen := map[string]bool{}
 	var reach func(a string) bool
 	reach = func(a string) bool {
+		a = b.Canon(a)
 		if a == group {
 			return true
 		}
@@ -143,7 +183,7 @@ func (b *Book) WouldCycle(group, member string) bool {
 			return false
 		}
 		seen[a] = true
-		c := b.Cards[a]
+		c := b.Lookup(a)
 		if c == nil || c.Kind != store.Group {
 			return false
 		}
@@ -229,15 +269,24 @@ func (b *Book) Suggest(name string) string {
 	if base[0] < 'A' || base[0] > 'Z' {
 		base = "X" + base
 	}
-	if b.Cards[base] == nil {
+	if b.Lookup(base) == nil {
 		return base
 	}
 	for i := 2; ; i++ {
 		a := base + itoa(i)
-		if b.Cards[a] == nil {
+		if b.Lookup(a) == nil {
 			return a
 		}
 	}
+}
+
+func contains(l []string, x string) bool {
+	for _, y := range l {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }
 
 func itoa(i int) string {

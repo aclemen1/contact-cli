@@ -330,6 +330,33 @@ func (y *Sync) Run() (*Report, error) {
 		}
 	}
 	sort.Strings(aliases)
+	// canon maps every alias, main or other, to the main one.
+	canon := map[string]string{}
+	for _, a := range aliases {
+		canon[a] = a
+	}
+	for _, a := range aliases {
+		for _, o := range cards[a].Aliases {
+			if canon[o] == "" {
+				canon[o] = a
+			}
+		}
+	}
+	// A card whose main alias changed keeps its link, found under one of its other aliases.
+	for a, l := range st.Links {
+		if m := canon[a]; cards[a] == nil && m != "" && m != a {
+			if _, ok := st.Links[m]; !ok {
+				st.Links[m] = l
+				delete(st.Links, a)
+			}
+		}
+	}
+	mainOf := func(m string) string {
+		if c := canon[m]; c != "" {
+			return c
+		}
+		return m
+	}
 	var todo []pending
 	edit := func(a string, f func(c *store.Contact) bool) { todo = append(todo, pending{a, f}) }
 	note := func(a, action, detail string) {
@@ -550,7 +577,7 @@ func (y *Sync) Run() (*Report, error) {
 		// Members: only those with an address-book id take part.
 		var cm []string
 		for _, m := range c.Members {
-			if remoteOf[m] != "" {
+			if m = mainOf(m); remoteOf[m] != "" {
 				cm = append(cm, m)
 			}
 		}
@@ -594,6 +621,9 @@ func (y *Sync) Run() (*Report, error) {
 		if len(addC)+len(delC) > 0 {
 			add, del := addC, delC
 			edit(a, func(c *store.Contact) bool {
+				for i, m := range c.Members {
+					c.Members[i] = mainOf(m)
+				}
 				c.Members = sorted(append(remove(c.Members, del), add...))
 				var parts []string
 				if len(add) > 0 {

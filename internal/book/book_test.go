@@ -12,7 +12,7 @@ func newBook(cs ...*store.Contact) *Book {
 		if c.Sphere == "" {
 			c.Sphere = "perso"
 		}
-		b.Cards[c.Alias] = c
+		b.Put(c)
 	}
 	b.computeGroups()
 	return b

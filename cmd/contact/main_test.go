@@ -148,7 +148,7 @@ func TestEditAndTSV(t *testing.T) {
 	var out bytes.Buffer
 	run([]string{"ls", "--format", "tsv"}, strings.NewReader(""), &out, &out)
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 2 || !strings.HasPrefix(lines[1], "JC\tperson\tperso\tJeannette Clément") {
+	if len(lines) != 2 || !strings.HasPrefix(lines[1], "JC\t\tperson\tperso\tJeannette Clément") {
 		t.Fatalf("tsv = %q", out.String())
 	}
 	b, _ := os.ReadFile(filepath.Join(e.dir, "perso", "JC.md"))
@@ -176,10 +176,10 @@ func TestShowViews(t *testing.T) {
 	if len(views) != 3 {
 		t.Fatalf("views = %v", views)
 	}
-	if r := views[0].(map[string]any)["result"].([]any); r[0] != "contact:JMR" {
+	if r := rows(views[0]); len(r) != 1 || r[0]["item"] != "contact:JMR" || r[0]["alias"] != "JMR" {
 		t.Fatalf("json view = %v", views[0])
 	}
-	if views[1].(map[string]any)["text"] != "cite JMR" || views[2].(map[string]any)["error"] == nil {
+	if r := rows(views[1]); len(r) != 1 || r[0]["text"] != "cite JMR" || views[2].(map[string]any)["error"] == nil {
 		t.Fatalf("views = %v", views)
 	}
 	if w, _ := m["warnings"].([]any); len(w) != 1 {
@@ -229,4 +229,103 @@ func TestHooks(t *testing.T) {
 	if want := "added contact:JMR perso\nmoved contact:JMR pro\n"; string(got) != want {
 		t.Fatalf("hooks ran:\n%s\nwant:\n%s", got, want)
 	}
+}
+
+func rows(v any) []map[string]any {
+	var out []map[string]any
+	for _, r := range v.(map[string]any)["rows"].([]any) {
+		out = append(out, r.(map[string]any))
+	}
+	return out
+}
+
+func TestSeveralAliases(t *testing.T) {
+	e := newEnv(t)
+	r := result(e.ok("add", "Eve Clément", "--sphere", "perso", "--alias", "EC", "--also", "eve", "--also", "EVE"))
+	if r["alias"] != "EC" || len(r["aliases"].([]any)) != 1 || r["aliases"].([]any)[0] != "EVE" {
+		t.Fatalf("add --also: %v", r)
+	}
+	// One namespace: an other alias blocks a main one and the reverse, in any sphere.
+	e.fails(4, "add", "Eveline Vernet", "--sphere", "pro", "--alias", "EVE")
+	e.ok("add", "Erwan Collin", "--sphere", "pro", "--alias", "ECO")
+	e.fails(4, "add", "X", "--sphere", "pro", "--alias", "XX", "--also", "EC")
+	e.fails(4, "edit", "ECO", "--add-alias", "EVE")
+	// Every alias designates the card.
+	if r := result(e.ok("show", "contact:EVE", "--no-views"))["contact"].(map[string]any); r["alias"] != "EC" {
+		t.Fatalf("show by other alias: %v", r)
+	}
+	if m := e.ok("resolve", "eve"); aliases(m) != "EC" {
+		t.Fatalf("resolve eve = %s", aliases(m))
+	}
+	// Members are kept by their main alias.
+	e.ok("add", "Famille", "--sphere", "perso", "--kind", "group", "--alias", "FAM", "--member", "EVE")
+	e.ok("add", "Équipe", "--sphere", "pro", "--kind", "group", "--alias", "EQ", "--member", "EC")
+	if r := result(e.ok("show", "FAM", "--no-views"))["contact"].(map[string]any); r["members"].([]any)[0] != "EC" {
+		t.Fatalf("members by main alias: %v", r)
+	}
+	if got := aliases(e.ok("members", "FAM")); got != "EC" {
+		t.Fatalf("members = %s", got)
+	}
+	e.fails(2, "edit", "EC", "--rm-alias", "EC")
+	// --primary renames the file and the groups naming the old alias, in every sphere.
+	r = result(e.ok("edit", "EVE", "--primary", "EVE", "--add-alias", "EVIE"))
+	if r["alias"] != "EVE" || strings.Join(strs(r["aliases"]), " ") != "EC EVIE" {
+		t.Fatalf("--primary: %v", r)
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "perso", "EC.md")); !os.IsNotExist(err) {
+		t.Fatal("the old file stays")
+	}
+	for _, g := range []string{"FAM", "EQ"} {
+		c := result(e.ok("show", g, "--no-views"))["contact"].(map[string]any)
+		if strs(c["members"])[0] != "EVE" {
+			t.Fatalf("%s members = %v", g, c["members"])
+		}
+	}
+	if r := result(e.ok("show", "EVE", "--no-views"))["contact"].(map[string]any); strings.Join(strs(r["groups"]), " ") != "EQ FAM" {
+		t.Fatalf("groups = %v", r["groups"])
+	}
+	e.ok("edit", "EVE", "--rm-alias", "EVIE")
+	e.ok("edit", "FAM", "--rm-member", "EC")
+	if c := result(e.ok("show", "FAM", "--no-views"))["contact"].(map[string]any); c["members"] != nil {
+		t.Fatalf("rm-member by other alias: %v", c["members"])
+	}
+	var out bytes.Buffer
+	run([]string{"ls", "--format", "tsv", "--sphere", "perso", "--kind", "person"}, strings.NewReader(""), &out, &out)
+	if l := strings.Split(strings.TrimSpace(out.String()), "\n"); len(l) != 2 || !strings.HasPrefix(l[1], "EVE\tEC\tperson") {
+		t.Fatalf("tsv = %q", out.String())
+	}
+}
+
+func TestShowViewsSeveralAliases(t *testing.T) {
+	e := newEnv(t)
+	cfg := filepath.Join(e.dir, "config.yaml")
+	b, _ := os.ReadFile(cfg)
+	b = append(b, []byte(`views:
+  - label: Tâches
+    run: [sh, -c, 'if [ "$0" = contact:EC ]; then printf "{\"ok\":true,\"result\":[\"PT-1\",\"PT-2\"]}"; else printf "{\"ok\":true,\"result\":[\"PT-2\",\"PT-3\"]}"; fi', "{ref}"]
+  - label: Texte
+    run: [echo, "commun"]
+`)...)
+	os.WriteFile(cfg, b, 0o644)
+	e.ok("add", "Eve Clément", "--sphere", "perso", "--alias", "EC", "--also", "EVE")
+	views := result(e.ok("show", "EVE"))["views"].([]any)
+	var got []string
+	for _, r := range rows(views[0]) {
+		got = append(got, r["item"].(string)+"@"+r["alias"].(string))
+	}
+	if strings.Join(got, " ") != "PT-1@EC PT-2@EC PT-3@EVE" {
+		t.Fatalf("merged rows = %v", got)
+	}
+	if r := rows(views[1]); len(r) != 1 || r[0]["alias"] != "EC" {
+		t.Fatalf("text rows once = %v", r)
+	}
+}
+
+func strs(v any) []string {
+	var out []string
+	l, _ := v.([]any)
+	for _, x := range l {
+		out = append(out, x.(string))
+	}
+	return out
 }

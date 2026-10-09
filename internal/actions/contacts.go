@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,7 +44,8 @@ func registerContacts() {
 			{Name: "sphere", Kind: spec.String, Required: true, Help: "Sphere of the main relationship: perso or pro. A contact of both is read from both; it is stored once.",
 				Missing: "a new card needs --sphere: the sphere of the main relationship; there is no default"},
 			kindParam(),
-			{Name: "alias", Kind: spec.String, Help: "Short alias in capitals, e.g. JMR. Refused when any sphere has it."},
+			{Name: "alias", Kind: spec.String, Help: "Main alias in capitals, e.g. JMR: the file name and the form other tools are given. Refused when any card of any sphere has it."},
+			{Name: "also", Kind: spec.StringList, Help: "Other alias of the card, repeatable, e.g. EVE beside EC; same namespace as the main ones."},
 			{Name: "given", Kind: spec.String, Help: "Given name of a person, when the last word of the name is not the family name."},
 			{Name: "family", Kind: spec.String, Help: "Family name of a person, e.g. « de Ricou »."},
 			{Name: "org", Kind: spec.String, Help: "Organisation a person works for."},
@@ -57,7 +59,7 @@ func registerContacts() {
 			{Name: "from", Kind: spec.String, Help: "Address-book card to take the card from, by id."},
 		},
 		Effects:  []string{"Writes <alias>.md in the sphere's store and commits it.", "Adds the alias to the members of each --group, in its own store.", "Fires the added hooks (updated for each group)."},
-		Examples: []string{`contact add "Jean-Moïse Rochat" --sphere pro --alias JMR --email jmr@unil.ch`, `contact add Famille --kind group --sphere perso --member AC --member EVE`, `contact add --from 45612C46-72AC-4BBF-9C72-8BB56BE8EC6F:ABPerson --sphere perso --alias AC`},
+		Examples: []string{`contact add "Jean-Moïse Rochat" --sphere pro --alias JMR --email jmr@unil.ch`, `contact add "Eve Clément" --sphere perso --alias EC --also EVE`, `contact add Famille --kind group --sphere perso --member AC --member EVE`, `contact add --from 45612C46-72AC-4BBF-9C72-8BB56BE8EC6F:ABPerson --sphere perso --alias AC`},
 		Run:      runAdd,
 	})
 	spec.Register(&spec.Action{
@@ -66,8 +68,11 @@ func registerContacts() {
 		Discussion: "Lists change element by element with --add-… and --rm-…; --phone and --email replace the whole list. " +
 			"--remote links the card to an address-book id, none unlinks it.",
 		Params: []spec.Param{
-			{Name: "alias", Kind: spec.String, Positional: true, Required: true, Help: "Alias of the card."},
+			{Name: "alias", Kind: spec.String, Positional: true, Required: true, Help: "Alias of the card, main or other."},
 			{Name: "name", Kind: spec.String, Help: "New full name."},
+			{Name: "add-alias", Kind: spec.StringList, Help: "Add another alias; refused when any card holds it."},
+			{Name: "rm-alias", Kind: spec.StringList, Help: "Remove another alias; the main one changes only by --primary."},
+			{Name: "primary", Kind: spec.String, Help: "Make this alias the main one: the file is renamed, the old main alias stays as another, groups naming it are rewritten."},
 			{Name: "given", Kind: spec.String, Help: "Given name; none clears it."},
 			{Name: "family", Kind: spec.String, Help: "Family name; none clears it."},
 			{Name: "org", Kind: spec.String, Help: "Organisation of a person; none clears it."},
@@ -90,8 +95,8 @@ func registerContacts() {
 			{Name: "append", Kind: spec.String, Help: "Add a paragraph to the free notes."},
 			{Name: "remote", Kind: spec.String, Help: "Address-book id to link; none unlinks."},
 		},
-		Effects:  []string{"Rewrites the card and commits it; joining or leaving a group rewrites the group.", "Fires the updated hooks."},
-		Examples: []string{"contact edit JMR --add-phone mobile:+41 79 000 00 00", "contact edit FAM --add-member TAC", "contact edit JC --add-tag jeannette --add-group FAM"},
+		Effects:  []string{"Rewrites the card and commits it; joining or leaving a group rewrites the group.", "--primary renames the file and rewrites the groups naming the old main alias, one commit per store.", "Fires the updated hooks."},
+		Examples: []string{"contact edit JMR --add-phone mobile:+41 79 000 00 00", "contact edit FAM --add-member TAC", "contact edit JC --add-tag jeannette --add-group FAM", "contact edit EC --add-alias EVE", "contact edit EC --primary EVE"},
 		Run:      runEdit,
 	})
 	spec.Register(&spec.Action{
@@ -117,8 +122,8 @@ func registerContacts() {
 	spec.Register(&spec.Action{
 		Category: "contact", Name: "show", Top: true,
 		Summary: "Show a card and what cites it elsewhere.",
-		Discussion: "The views come from the configuration: each runs a command with {ref} replaced by contact:<alias> and {alias} by the alias; " +
-			"a failing view is a warning. A group shows its members.",
+		Discussion: "The views come from the configuration: each runs once per alias of the card, with {ref} replaced by contact:<alias> and {alias} by the alias; " +
+			"their rows are merged, each once, with the alias that found it. A failing view is a warning. A group shows its members.",
 		Params: []spec.Param{
 			{Name: "alias", Kind: spec.String, Positional: true, Required: true, Help: "Alias of the card, with or without contact:."},
 			{Name: "no-views", Kind: spec.Bool, Help: "Show the card alone."},
@@ -207,16 +212,32 @@ func normAliases(l []string) ([]string, error) {
 	return out, nil
 }
 
-func checkMembers(b *book.Book, group string, members []string) error {
+// checkMembers checks the members of a group and gives them by their main alias.
+func checkMembers(b *book.Book, group string, members []string) ([]string, error) {
+	var out []string
 	for _, m := range members {
-		if b.Cards[m] == nil {
-			return spec.NotFound("no contact %s to add to %s. Create it first: contact add <name> --alias %s --sphere <sphere>", m, group, m)
+		mc := b.Lookup(m)
+		if mc == nil {
+			return nil, spec.NotFound("no contact %s to add to %s. Create it first: contact add <name> --alias %s --sphere <sphere>", m, group, m)
 		}
-		if b.WouldCycle(group, m) {
-			return spec.Conflict("%s in %s would make a cycle of groups", m, group)
+		if b.WouldCycle(group, mc.Alias) {
+			return nil, spec.Conflict("%s in %s would make a cycle of groups", m, group)
 		}
+		out = append(out, mc.Alias)
 	}
-	return nil
+	return out, nil
+}
+
+// checkFree refuses an alias another card holds, as main or other alias, in any sphere.
+func checkFree(ctx *spec.Context, b *book.Book, self *store.Contact, a, name string) error {
+	old := b.Lookup(a)
+	if old == nil || old == self {
+		return nil
+	}
+	if ctx.Spheres != nil && !contains(ctx.Spheres, old.Sphere) {
+		return spec.Conflict("alias %s is taken in another sphere. Free: %s", a, b.Suggest(name))
+	}
+	return spec.Conflict("alias %s is taken by %s (%s, %s). Free: %s", a, old.Alias, old.Name, old.Sphere, b.Suggest(name))
 }
 
 func cleanList(l []string) []string {
@@ -263,14 +284,24 @@ func runAdd(ctx *spec.Context) (any, error) {
 		if c.Alias, err = store.NormAlias(a); err != nil {
 			return nil, err
 		}
-		if old := b.Cards[c.Alias]; old != nil {
-			if ctx.Spheres != nil && !contains(ctx.Spheres, old.Sphere) {
-				return nil, spec.Conflict("alias %s is taken in another sphere. Free: %s", c.Alias, b.Suggest(c.Name))
-			}
-			return nil, spec.Conflict("alias %s is taken by %s (%s). Free: %s", c.Alias, old.Name, old.Sphere, b.Suggest(c.Name))
+		if err := checkFree(ctx, b, nil, c.Alias, c.Name); err != nil {
+			return nil, err
 		}
 	} else {
 		c.Alias = b.Suggest(c.Name)
+	}
+	also, err := normAliases(ctx.List("also"))
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range also {
+		if a == c.Alias || contains(c.Aliases, a) {
+			continue
+		}
+		if err := checkFree(ctx, b, nil, a, c.Name); err != nil {
+			return nil, err
+		}
+		c.Aliases = append(c.Aliases, a)
 	}
 	members, err := normAliases(ctx.List("member"))
 	if err != nil {
@@ -279,8 +310,8 @@ func runAdd(ctx *spec.Context) (any, error) {
 	if len(members) > 0 && c.Kind != store.Group {
 		return nil, spec.UserError("--member needs --kind group")
 	}
-	b.Cards[c.Alias] = c
-	if err := checkMembers(b, c.Alias, members); err != nil {
+	b.Put(c)
+	if members, err = checkMembers(b, c.Alias, members); err != nil {
 		return nil, err
 	}
 	c.Members = members
@@ -288,11 +319,12 @@ func runAdd(ctx *spec.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, g := range groups {
-		gc := b.Cards[g]
+	for i, g := range groups {
+		gc := b.Lookup(g)
 		if gc == nil || gc.Kind != store.Group {
 			return nil, spec.NotFound("no group %s. List them with: contact ls --kind group", g)
 		}
+		groups[i] = gc.Alias
 		if b.WouldCycle(g, c.Alias) {
 			return nil, spec.Conflict("%s in %s would make a cycle of groups", c.Alias, g)
 		}
@@ -325,7 +357,7 @@ func runAdd(ctx *spec.Context) (any, error) {
 
 // fillFrom fills a new card from an address-book card.
 func fillFrom(cfg *config.Config, b *book.Book, c *store.Contact, id string) error {
-	for _, o := range b.Cards {
+	for _, o := range b.Sorted() {
 		if o.Remote == id {
 			return spec.Conflict("%s is already linked to %s (%s)", id, o.Alias, o.Name)
 		}
@@ -385,9 +417,14 @@ func fillFrom(cfg *config.Config, b *book.Book, c *store.Contact, id string) err
 
 // joinGroup adds (or, with join false, removes) a member to a group, in the group's store.
 func joinGroup(ctx *spec.Context, cfg *config.Config, b *book.Book, group, member string, join bool) error {
-	g := b.Cards[group]
+	g := b.Lookup(group)
 	if g == nil || g.Kind != store.Group {
 		return spec.NotFound("no group %s", group)
+	}
+	group = g.Alias
+	forms := []string{member}
+	if mc := b.Lookup(member); mc != nil {
+		member, forms = mc.Alias, mc.AllAliases()
 	}
 	s := b.Stores[g.Sphere]
 	var saved *store.Contact
@@ -396,14 +433,15 @@ func joinGroup(ctx *spec.Context, cfg *config.Config, b *book.Book, group, membe
 		if err != nil || cur == nil {
 			return "", spec.NotFound("no group %s", group)
 		}
-		if contains(cur.Members, member) == join {
+		in := len(removeAll(cur.Members, forms)) < len(cur.Members)
+		if in == join {
 			return "", nil
 		}
 		verb := "added"
 		if join {
 			cur.Members = append(cur.Members, member)
 		} else {
-			cur.Members = removeAll(cur.Members, []string{member})
+			cur.Members = removeAll(cur.Members, forms)
 			verb = "removed"
 		}
 		s.Note(cur, "member "+verb+": "+member)
@@ -455,6 +493,37 @@ func runEdit(ctx *spec.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	old := c.Alias
+	primary := old
+	if p := ctx.Str("primary"); p != "" {
+		if primary, err = store.NormAlias(p); err != nil {
+			return nil, err
+		}
+		if err := checkFree(ctx, b, c, primary, c.Name); err != nil {
+			return nil, err
+		}
+	}
+	addA, err := normAliases(ctx.List("add-alias"))
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range addA {
+		if err := checkFree(ctx, b, c, a, c.Name); err != nil {
+			return nil, err
+		}
+	}
+	rmA, err := normAliases(ctx.List("rm-alias"))
+	if err != nil {
+		return nil, err
+	}
+	if contains(rmA, primary) {
+		return nil, spec.UserError("%s is the main alias of the card; make another one main first with --primary", primary)
+	}
+	others := removeAll(addAll(c.Aliases, addA), rmA)
+	if primary != old {
+		others = addAll(removeAll(others, []string{primary}), []string{old})
+		others = removeAll(others, rmA)
+	}
 	addM, err := normAliases(ctx.List("add-member"))
 	if err != nil {
 		return nil, err
@@ -463,11 +532,19 @@ func runEdit(ctx *spec.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	addG, err := normAliases(ctx.List("add-group"))
+	var rmForms []string
+	for _, m := range rmM {
+		if mc := b.Lookup(m); mc != nil {
+			rmForms = append(rmForms, mc.AllAliases()...)
+		} else {
+			rmForms = append(rmForms, m)
+		}
+	}
+	addG, err := canonGroups(b, ctx.List("add-group"), true)
 	if err != nil {
 		return nil, err
 	}
-	rmG, err := normAliases(ctx.List("rm-group"))
+	rmG, err := canonGroups(b, ctx.List("rm-group"), false)
 	if err != nil {
 		return nil, err
 	}
@@ -487,14 +564,10 @@ func runEdit(ctx *spec.Context) (any, error) {
 	if len(addM) > 0 && effKind != store.Group {
 		return nil, spec.UserError("%s is a %s; only a group has members", c.Alias, effKind)
 	}
-	if err := checkMembers(b, c.Alias, addM); err != nil {
+	if addM, err = checkMembers(b, c.Alias, addM); err != nil {
 		return nil, err
 	}
 	for _, g := range addG {
-		gc := b.Cards[g]
-		if gc == nil || gc.Kind != store.Group {
-			return nil, spec.NotFound("no group %s. List them with: contact ls --kind group", g)
-		}
 		if b.WouldCycle(g, c.Alias) {
 			return nil, spec.Conflict("%s in %s would make a cycle of groups", c.Alias, g)
 		}
@@ -503,9 +576,9 @@ func runEdit(ctx *spec.Context) (any, error) {
 	var changed []string
 	var saved *store.Contact
 	err = s.WriteAs(func() (string, error) {
-		cur, err := s.Get(c.Alias)
+		cur, err := s.Get(old)
 		if err != nil || cur == nil {
-			return "", spec.NotFound("no contact %s", c.Alias)
+			return "", spec.NotFound("no contact %s", old)
 		}
 		set := func(name string, dst *string, v string, ok bool) {
 			if ok && *dst != v {
@@ -552,20 +625,60 @@ func runEdit(ctx *spec.Context) (any, error) {
 		setList("emails", &cur.Emails, removeAll(addAll(emails, cleanList(ctx.List("add-email"))), ctx.List("rm-email")))
 		setList("tags", &cur.Tags, removeAll(addAll(cur.Tags, cleanList(ctx.List("add-tag"))), ctx.List("rm-tag")))
 		setList("refs", &cur.Refs, removeAll(addAll(cur.Refs, cleanList(ctx.List("add-ref"))), ctx.List("rm-ref")))
-		setList("members", &cur.Members, removeAll(addAll(cur.Members, addM), rmM))
+		setList("members", &cur.Members, removeAll(addAll(cur.Members, addM), rmForms))
+		setList("aliases", &cur.Aliases, sortedCopy(others))
+		renamed := primary != old
+		if renamed {
+			cur.Alias = primary
+			changed = append(changed, "main alias")
+		}
 		if len(changed) == 0 {
 			saved = cur
 			return "", nil
 		}
-		s.Note(cur, "edited: "+strings.Join(changed, ", "))
+		what := "edited: " + strings.Join(changed, ", ")
+		if renamed {
+			what = "renamed " + old + " → " + primary
+			if len(changed) > 1 {
+				what += "; edited: " + strings.Join(changed[:len(changed)-1], ", ")
+			}
+		}
+		s.Note(cur, what)
 		if err := s.Save(cur); err != nil {
 			return "", err
 		}
 		saved = cur
-		return fmt.Sprintf("update %s: %s", cur.Alias, strings.Join(changed, ", ")), nil
+		if !renamed {
+			return fmt.Sprintf("update %s: %s", cur.Alias, strings.Join(changed, ", ")), nil
+		}
+		if err := s.Remove(old); err != nil {
+			return "", err
+		}
+		if _, err := renameInGroups(s, old, primary); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("rename %s → %s", old, primary), nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if primary != old {
+		for n, st := range b.Stores {
+			if n == c.Sphere {
+				continue
+			}
+			if err := st.WriteAs(func() (string, error) {
+				n, err := renameInGroups(st, old, primary)
+				if err != nil || n == 0 {
+					return "", err
+				}
+				return fmt.Sprintf("rename %s → %s", old, primary), nil
+			}); err != nil {
+				ctx.Warn(fmt.Sprintf("groups of %s still name %s: %v", n, old, err))
+			}
+		}
+		c = saved
+		b.Put(saved)
 	}
 	if len(changed) > 0 {
 		fire(ctx, cfg, s, saved, "updated", "")
@@ -580,14 +693,65 @@ func runEdit(ctx *spec.Context) (any, error) {
 			return nil, err
 		}
 	}
-	if len(addG)+len(rmG) > 0 {
-		if b, err = LoadBook(ctx, cfg); err == nil {
-			saved = b.Cards[c.Alias]
+	if len(addG)+len(rmG) > 0 || primary != old {
+		if b, err = LoadBook(ctx, cfg); err == nil && b.Cards[saved.Alias] != nil {
+			saved = b.Cards[saved.Alias]
 		}
 	} else {
 		saved.Groups = c.Groups
 	}
 	return saved, nil
+}
+
+// renameInGroups rewrites, in one store, the groups whose members name old; the caller holds the lock.
+func renameInGroups(s *store.Store, old, now string) (int, error) {
+	cs, err := s.List()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, g := range cs {
+		if g.Kind != store.Group || !contains(g.Members, old) {
+			continue
+		}
+		g.Members = addAll(removeAll(g.Members, []string{old}), []string{now})
+		s.Note(g, "member renamed: "+old+" → "+now)
+		if err := s.Save(g); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// canonGroups gives groups by their main alias; strict refuses one that is not a group.
+func canonGroups(b *book.Book, l []string, strict bool) ([]string, error) {
+	as, err := normAliases(l)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, a := range as {
+		g := b.Lookup(a)
+		if g == nil || g.Kind != store.Group {
+			if strict {
+				return nil, spec.NotFound("no group %s. List them with: contact ls --kind group", a)
+			}
+			out = append(out, a)
+			continue
+		}
+		out = append(out, g.Alias)
+	}
+	return out, nil
+}
+
+func sortedCopy(l []string) []string {
+	if len(l) == 0 {
+		return nil
+	}
+	out := append([]string{}, l...)
+	sort.Strings(out)
+	return out
 }
 
 func runRm(ctx *spec.Context) (any, error) {
@@ -664,12 +828,25 @@ func runMv(ctx *spec.Context) (any, error) {
 	return c, nil
 }
 
-// ViewResult is the output of a configured view.
+// ViewRow is one line of text, or one item of a JSON result, found under an alias.
+type ViewRow struct {
+	Alias string          `json:"alias"`
+	Text  string          `json:"text,omitempty"`
+	Item  json.RawMessage `json:"item,omitempty"`
+}
+
+// ViewResult is the output of a configured view, every alias merged.
 type ViewResult struct {
-	Label  string          `json:"label"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Text   string          `json:"text,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Label string    `json:"label"`
+	Rows  []ViewRow `json:"rows"`
+	Error string    `json:"error,omitempty"`
+}
+
+// viewOut is the output of one run of a view.
+type viewOut struct {
+	Result json.RawMessage
+	Text   string
+	Error  string
 }
 
 type Shown struct {
@@ -690,14 +867,14 @@ func runShow(ctx *spec.Context) (any, error) {
 	out := &Shown{Contact: c}
 	if c.Kind == store.Group {
 		for _, m := range c.Members {
-			if mc := b.Cards[m]; mc != nil {
+			if mc := b.Lookup(m); mc != nil {
 				out.Members = append(out.Members, mc)
 			}
 		}
 	}
 	if !ctx.Bool("no-views") {
 		for _, v := range cfg.Views {
-			r := runView(v, c.Alias)
+			r := mergeView(v, c.AllAliases())
 			if r.Error != "" {
 				ctx.Warn(fmt.Sprintf("view %s: %s", v.Label, r.Error))
 			}
@@ -707,8 +884,53 @@ func runShow(ctx *spec.Context) (any, error) {
 	return out, nil
 }
 
-func runView(v config.View, alias string) ViewResult {
-	r := ViewResult{Label: v.Label}
+// mergeView runs a view once per alias and keeps each row once, under the first alias that found it.
+func mergeView(v config.View, aliases []string) ViewResult {
+	r := ViewResult{Label: v.Label, Rows: []ViewRow{}}
+	seen := map[string]bool{}
+	var errs []string
+	add := func(row ViewRow, key string) {
+		if !seen[key] {
+			seen[key] = true
+			r.Rows = append(r.Rows, row)
+		}
+	}
+	for _, a := range aliases {
+		o := runView(v, a)
+		switch {
+		case o.Error != "":
+			if len(aliases) > 1 {
+				errs = append(errs, a+": "+o.Error)
+			} else {
+				errs = append(errs, o.Error)
+			}
+		case len(o.Result) > 0:
+			var items []json.RawMessage
+			if json.Unmarshal(o.Result, &items) != nil {
+				items = []json.RawMessage{o.Result}
+			}
+			for _, it := range items {
+				var buf bytes.Buffer
+				if json.Compact(&buf, it) != nil {
+					buf.Reset()
+					buf.Write(it)
+				}
+				add(ViewRow{Alias: a, Item: json.RawMessage(buf.Bytes())}, "j"+buf.String())
+			}
+		default:
+			for _, l := range strings.Split(o.Text, "\n") {
+				if strings.TrimSpace(l) != "" {
+					add(ViewRow{Alias: a, Text: l}, "t"+l)
+				}
+			}
+		}
+	}
+	r.Error = strings.Join(errs, "; ")
+	return r
+}
+
+func runView(v config.View, alias string) viewOut {
+	var r viewOut
 	timeout := 20 * time.Second
 	if v.Timeout != "" {
 		if d, err := time.ParseDuration(v.Timeout); err == nil {
@@ -759,6 +981,9 @@ func textShow(w io.Writer, res any) {
 	s := res.(*Shown)
 	c := s.Contact
 	fmt.Fprintf(w, "%s · %s · %s (%s)\n", c.Alias, c.Name, c.Kind, c.Sphere)
+	if len(c.Aliases) > 0 {
+		fmt.Fprintf(w, "  %-9s %s\n", "aliases", strings.Join(c.Aliases, ", "))
+	}
 	line := func(label string, v string) {
 		if v != "" {
 			fmt.Fprintf(w, "  %-9s %s\n", label, v)
@@ -782,17 +1007,21 @@ func textShow(w io.Writer, res any) {
 	}
 	for _, v := range s.Views {
 		fmt.Fprintf(w, "\n%s:\n", v.Label)
-		switch {
-		case v.Error != "":
+		if v.Error != "" {
 			fmt.Fprintf(w, "  (error: %s)\n", v.Error)
-		case v.Text != "":
-			for _, l := range strings.Split(v.Text, "\n") {
-				fmt.Fprintf(w, "  %s\n", l)
+		}
+		for _, row := range v.Rows {
+			via := ""
+			if len(c.Aliases) > 0 {
+				via = "  [" + row.Alias + "]"
 			}
-		case len(v.Result) > 0:
+			if row.Text != "" {
+				fmt.Fprintf(w, "  %s%s\n", row.Text, via)
+				continue
+			}
 			var pretty bytes.Buffer
-			if json.Indent(&pretty, v.Result, "  ", "  ") == nil {
-				fmt.Fprintf(w, "  %s\n", pretty.String())
+			if json.Indent(&pretty, row.Item, "  ", "  ") == nil {
+				fmt.Fprintf(w, "  %s%s\n", pretty.String(), via)
 			}
 		}
 	}
@@ -830,7 +1059,7 @@ func runLs(ctx *spec.Context) (any, error) {
 		if tag != "" && !containsFold(c.Tags, tag) {
 			continue
 		}
-		if q != "" && !strings.Contains(book.Fold(c.Alias+" "+c.Name+" "+c.Org), q) {
+		if q != "" && !strings.Contains(book.Fold(strings.Join(c.AllAliases(), " ")+" "+c.Name+" "+c.Org), q) {
 			continue
 		}
 		out = append(out, c)
@@ -854,6 +1083,9 @@ func textLs(w io.Writer, res any) {
 			extra = strings.Join(c.Members, ", ")
 		}
 		fmt.Fprintf(w, "%-8s %-12s %-6s %s", c.Alias, c.Kind, c.Sphere, c.Name)
+		if len(c.Aliases) > 0 {
+			fmt.Fprintf(w, " [%s]", strings.Join(c.Aliases, ", "))
+		}
 		if extra != "" {
 			fmt.Fprintf(w, " · %s", extra)
 		}
@@ -863,9 +1095,9 @@ func textLs(w io.Writer, res any) {
 
 func tsvLs(w io.Writer, res any) {
 	clean := func(s string) string { return strings.NewReplacer("\t", " ", "\n", " ").Replace(s) }
-	fmt.Fprintln(w, "alias\tkind\tsphere\tname\torg\ttags\temails\tphones\tgroups")
+	fmt.Fprintln(w, "alias\taliases\tkind\tsphere\tname\torg\ttags\temails\tphones\tgroups")
 	for _, c := range res.([]*store.Contact) {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Alias, c.Kind, c.Sphere, clean(c.Name), clean(c.Org),
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Alias, strings.Join(c.Aliases, ","), c.Kind, c.Sphere, clean(c.Name), clean(c.Org),
 			strings.Join(c.Tags, ","), clean(strings.Join(c.Emails, ",")), clean(strings.Join(c.Phones, ",")), strings.Join(c.Groups, ","))
 	}
 }

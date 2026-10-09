@@ -36,8 +36,10 @@ type LogEntry struct {
 
 type Contact struct {
 	Alias string `yaml:"alias" json:"alias"`
-	Kind  string `yaml:"kind" json:"kind"`
-	Name  string `yaml:"name" json:"name"`
+	// Aliases are the card's other aliases, unique across spheres like the main one.
+	Aliases []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+	Kind    string   `yaml:"kind" json:"kind"`
+	Name    string   `yaml:"name" json:"name"`
 	// Given and Family split the name of a person for the address book; empty: the last word is the family name.
 	Given  string `yaml:"given,omitempty" json:"given,omitempty"`
 	Family string `yaml:"family,omitempty" json:"family,omitempty"`
@@ -62,6 +64,19 @@ type Contact struct {
 	Sphere  string     `yaml:"-" json:"sphere"`
 	// Groups are the groups whose members name this card, computed on reading.
 	Groups []string `yaml:"-" json:"groups,omitempty"`
+}
+
+// AllAliases lists the main alias, then the others.
+func (c *Contact) AllAliases() []string { return append([]string{c.Alias}, c.Aliases...) }
+
+// Has says whether a is one of the card's aliases.
+func (c *Contact) Has(a string) bool {
+	for _, x := range c.AllAliases() {
+		if x == a {
+			return true
+		}
+	}
+	return false
 }
 
 var aliasRe = regexp.MustCompile(`^[A-Z][A-Z0-9-]{0,23}$`)
@@ -231,6 +246,7 @@ func (s *Store) Get(alias string) (*Contact, error) {
 
 // Save writes the card's file atomically; the file name follows the alias.
 func (s *Store) Save(c *Contact) error {
+	c.Aliases = sorted(c.Aliases)
 	c.Members = sorted(c.Members)
 	c.Refs = sorted(c.Refs)
 	c.Tags = sorted(c.Tags)
@@ -286,6 +302,17 @@ func read(path string) (*Contact, error) {
 	if c.Kind == "" {
 		c.Kind = Person
 	}
+	var aliases []string
+	for _, a := range c.Aliases {
+		n, err := NormAlias(a)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", path, err)
+		}
+		if n != c.Alias {
+			aliases = append(aliases, n)
+		}
+	}
+	c.Aliases = sorted(aliases)
 	return c, nil
 }
 

@@ -116,6 +116,20 @@ func (st *State) Save(path string) error {
 }
 
 // Change is one thing the sync did, or would do in a dry run.
+// Adopt records the address-book card a new card was taken from as the base
+// of their link, so that the first sync tells which side changed since.
+func Adopt(path, alias, id string, r *Card) error {
+	st, err := LoadState(path)
+	if err != nil {
+		return err
+	}
+	if _, ok := st.Links[alias]; ok {
+		return nil
+	}
+	st.Links[alias] = link{ID: id, Base: remoteFields(r)}
+	return st.Save(path)
+}
+
 type Change struct {
 	Alias  string `json:"alias"`
 	Action string `json:"action"`

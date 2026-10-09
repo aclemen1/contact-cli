@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -269,8 +270,9 @@ func runAdd(ctx *spec.Context) (any, error) {
 	c := &store.Contact{Kind: ctx.Str("kind"), Name: strings.TrimSpace(ctx.Str("name")), Given: ctx.Str("given"), Family: ctx.Str("family"),
 		Org: ctx.Str("org"), Phones: cleanList(ctx.List("phone")), Emails: cleanList(ctx.List("email")), Tags: cleanList(ctx.List("tag")),
 		Refs: cleanList(ctx.List("ref")), Body: ctx.Str("body"), Created: now, Updated: now}
+	var taken *csync.Card
 	if from := ctx.Str("from"); from != "" {
-		if err := fillFrom(cfg, b, c, from); err != nil {
+		if taken, err = fillFrom(cfg, b, c, from); err != nil {
 			return nil, err
 		}
 	}
@@ -346,6 +348,11 @@ func runAdd(ctx *spec.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if taken != nil {
+		if err := csync.Adopt(filepath.Join(config.StateDir(), "contacts.json"), c.Alias, c.Remote, taken); err != nil {
+			ctx.Warn(fmt.Sprintf("%s: sync base not recorded: %v", c.Alias, err))
+		}
+	}
 	fire(ctx, cfg, s, c, "added", "")
 	for _, g := range groups {
 		if err := joinGroup(ctx, cfg, b, g, c.Alias, true); err != nil {
@@ -356,29 +363,29 @@ func runAdd(ctx *spec.Context) (any, error) {
 }
 
 // fillFrom fills a new card from an address-book card.
-func fillFrom(cfg *config.Config, b *book.Book, c *store.Contact, id string) error {
+func fillFrom(cfg *config.Config, b *book.Book, c *store.Contact, id string) (*csync.Card, error) {
 	for _, o := range b.Sorted() {
 		if o.Remote == id {
-			return spec.Conflict("%s is already linked to %s (%s)", id, o.Alias, o.Name)
+			return nil, spec.Conflict("%s is already linked to %s (%s)", id, o.Alias, o.Name)
 		}
 	}
 	back := NewBackend(cfg)
 	r, err := back.GetRaw(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if r == nil {
-		return spec.NotFound("no address-book card %s. Find one with: macos contacts list --matches-name <name> --no-unify", id)
+		return nil, spec.NotFound("no address-book card %s. Find one with: macos contacts list --matches-name <name> --no-unify", id)
 	}
 	if r.IsUnified {
-		return spec.UserError("%s is a merged card; take one of its individual cards (contacts list --no-unify)", id)
+		return nil, spec.UserError("%s is a merged card; take one of its individual cards (contacts list --no-unify)", id)
 	}
 	container, err := back.Container(cfg.Contacts.Container)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if r.ContainerID != "" && r.ContainerID != container {
-		return spec.UserError("%s is not in the %s address book; take its %s card (contacts list --no-unify --container %s)", id, cfg.Contacts.Container, cfg.Contacts.Container, container)
+		return nil, spec.UserError("%s is not in the %s address book; take its %s card (contacts list --no-unify --container %s)", id, cfg.Contacts.Container, cfg.Contacts.Container, container)
 	}
 	card := r.Card()
 	if card.Kind == "organization" {
@@ -412,7 +419,7 @@ func fillFrom(cfg *config.Config, b *book.Book, c *store.Contact, id string) err
 		c.Emails = card.Emails
 	}
 	c.Remote = id
-	return nil
+	return card, nil
 }
 
 // joinGroup adds (or, with join false, removes) a member to a group, in the group's store.

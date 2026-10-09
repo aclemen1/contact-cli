@@ -330,3 +330,19 @@ func TestOtherAliases(t *testing.T) {
 		t.Fatalf("rename lost the link: %d cards, %+v", len(f.cards), rep)
 	}
 }
+
+func TestAdoptedCardEditWins(t *testing.T) {
+	y, f, s := setup(t)
+	f.cards["X:ABPerson"] = &Card{ID: "X:ABPerson", Kind: "person", Given: "Jean-Moïse", Family: "Rochat", Org: "UNILTITLE:x"}
+	if err := Adopt(y.State, "JMR", "X:ABPerson", f.cards["X:ABPerson"]); err != nil {
+		t.Fatal(err)
+	}
+	save(t, s, &store.Contact{Alias: "JMR", Kind: store.Person, Name: "Jean-Moïse Rochat", Org: "UNIL", Remote: "X:ABPerson"})
+	run(t, y)
+	if got := f.cards["X:ABPerson"].Org; got != "UNIL" {
+		t.Fatalf("address book org = %q, want the edited card's", got)
+	}
+	if got := get(t, s, "JMR").Org; got != "UNIL" {
+		t.Fatalf("card org = %q", got)
+	}
+}

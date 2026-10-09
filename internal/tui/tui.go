@@ -23,10 +23,13 @@ import (
 func init() {
 	spec.Register(&spec.Action{
 		Category: "setup", Name: "tui", Top: true,
-		Summary:  "Open the terminal interface: the cards, the selected one with what cites it, modals to add and edit.",
-		Params:   []spec.Param{{Name: "sphere", Kind: spec.String, Help: "Show only this sphere. Defaults to every sphere."}},
+		Summary: "Open the terminal interface: the cards, the selected one with what cites it, modals to add and edit.",
+		Params: []spec.Param{
+			{Name: "sphere", Kind: spec.String, Help: "Show only this sphere. Defaults to every sphere."},
+			{Name: "select", Kind: spec.String, Help: "Open on this contact, selected and visible: any of its aliases, with or without contact: (JMR, contact:JMR). An unknown alias opens the list as usual, with a message."},
+		},
 		Effects:  []string{"Runs until q; every change goes through the same actions as the CLI."},
-		Examples: []string{"contact tui", "contact tui --sphere pro"},
+		Examples: []string{"contact tui", "contact tui --sphere pro", "contact tui --select JMR"},
 		Run: func(ctx *spec.Context) (any, error) {
 			cfg, err := config.Load(ctx.Config)
 			if err != nil {
@@ -47,6 +50,9 @@ func init() {
 				m.say("rechargé "+v, false)
 			} else {
 				m.reload()
+			}
+			if a := ctx.Str("select"); a != "" && !m.pick(a) {
+				m.say("contact inconnu : "+a, true)
 			}
 			return spec.Streamed{}, run(m)
 		},
@@ -489,6 +495,23 @@ func (m *Model) selectAlias(a string) {
 			m.sel = i
 		}
 	}
+}
+
+// pick selects the card that has this alias, main or other; false when none is listed.
+func (m *Model) pick(a string) bool {
+	a, err := store.NormAlias(a)
+	if err != nil {
+		return false
+	}
+	for i, c := range m.items {
+		for _, x := range c.AllAliases() {
+			if x == a {
+				m.sel = i
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Model) sphereName() string {

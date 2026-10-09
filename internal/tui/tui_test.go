@@ -177,3 +177,13 @@ func TestReloadOnRebuild(t *testing.T) {
 		t.Fatal("SIGUSR1 reloads when idle")
 	}
 }
+
+func TestPick(t *testing.T) {
+	m, _, _ := newTestModel(t)
+	if !m.pick("contact:jmr") || m.items[m.sel].Alias != "JMR" {
+		t.Fatalf("contact:jmr not selected: %d", m.sel)
+	}
+	if m.pick("NOPE") {
+		t.Fatal("unknown alias must not be picked")
+	}
+}

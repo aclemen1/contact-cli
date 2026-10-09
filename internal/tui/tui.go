@@ -276,20 +276,16 @@ func (m *Model) key(k string) tea.Cmd {
 		return m.open("Synchroniser avec le carnet d'adresses ?", tuikit.NewConfirm("sync", "Écrire dans le carnet d'adresses les changements des fiches ?"))
 	case "c", "n":
 		return m.openAdd()
-	case "e":
-		if c != nil {
-			return m.openEdit(c)
-		}
 	case "E":
 		if c != nil {
-			m.editing = c.Alias
-			return m.open("Corps de "+c.Alias, tuikit.NewEditor("body", "Notes libres (jamais envoyées au carnet d'adresses)", c.Body))
+			return m.openEdit(c)
 		}
 	case "N":
 		if c != nil {
 			m.editing = c.Alias
 			if m.cfg == nil || len(m.cfg.Notes.Add) == 0 {
-				return m.open("Corps de "+c.Alias, tuikit.NewEditor("body", "Notes libres (pas de notes.add dans la configuration)", c.Body))
+				m.say("pas de notes.add dans la configuration", true)
+				return nil
 			}
 			return m.open("Note de suivi · "+c.Alias, tuikit.NewEditor("note", "Note de suivi", ""))
 		}
@@ -370,6 +366,7 @@ func (m *Model) openEdit(c *store.Contact) tea.Cmd {
 		tuikit.Text("emails", "E-mails").Default(strings.Join(c.Emails, ", ")),
 		tuikit.Text("tags", "Tags").Default(strings.Join(c.Tags, ", ")),
 		tuikit.Text("refs", "Réfs").Default(strings.Join(c.Refs, ", ")).Help("<outil>:<id>, séparés par des virgules"),
+		tuikit.TextArea("body", "Notes libres").Default(c.Body).Help("jamais envoyées au carnet d'adresses"),
 	)
 	return m.open("Modifier "+c.Alias, f)
 }
@@ -417,7 +414,7 @@ func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 		}
 	case "edit":
 		args := map[string]any{"alias": m.editing, "name": v.String("name"), "org": orNone(v.String("org")),
-			"phone": split(v.String("phones")), "email": split(v.String("emails"))}
+			"phone": split(v.String("phones")), "email": split(v.String("emails")), "body": v.String("body")}
 		cur := m.byAlias(m.editing)
 		if cur != nil {
 			tags, refs := split(v.String("tags")), split(v.String("refs"))
@@ -427,11 +424,6 @@ func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 		if _, err = m.call("edit", args); err == nil {
 			m.reload()
 			m.say("fiche "+m.editing+" modifiée", false)
-		}
-	case "body":
-		if _, err = m.call("edit", map[string]any{"alias": m.editing, "body": v.String("body")}); err == nil {
-			m.reload()
-			m.say("corps de "+m.editing+" enregistré", false)
 		}
 	case "note":
 		text := strings.TrimSpace(v.String("note"))
@@ -518,7 +510,7 @@ func kindName(k string) string {
 	return "toutes"
 }
 
-const help = "j/k bouger · gg/G début/fin · entrée détail · esc retour · / filtrer · 1-4 sorte · s sphère · c nouvelle · e modifier · E corps · N note de suivi · M membres · # supprimer · R synchroniser · r relire · q quitter"
+const help = "j/k bouger · gg/G début/fin · entrée détail · esc retour · / filtrer · 1-4 sorte · s sphère · c nouvelle · E modifier · N note de suivi · M membres · # supprimer · R synchroniser · r relire · q quitter"
 
 func (m *Model) View() tea.View {
 	v := tea.NewView(tuikit.Overlay(m.render(), m.modal, m.w, m.h))

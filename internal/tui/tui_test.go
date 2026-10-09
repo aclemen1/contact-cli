@@ -84,20 +84,24 @@ func values(id, v string) tuikit.Values {
 	return vs
 }
 
-func TestBodyByE(t *testing.T) {
+func TestEditByE(t *testing.T) {
 	m, s, _ := newTestModel(t)
+	m.key("e")
+	if m.modal.Open() {
+		t.Fatal("e is free: no form")
+	}
 	m.key("E")
 	if !m.modal.Open() || m.editing != "AC" {
-		t.Fatal("E opens the body editor")
+		t.Fatal("E opens the edit form")
 	}
 	m.modal = nil
-	m.done(tuikit.DoneMsg{ID: "body", Values: values("body", "Préfère le matin.")})
-	if c, _ := s.Get("AC"); c == nil || c.Body != "Préfère le matin." {
-		t.Fatalf("body not saved: %+v (%s)", c, m.status)
-	}
-	m.key("e")
-	if !m.modal.Open() {
-		t.Fatal("e opens the edit form")
+	c, _ := s.Get("AC")
+	var vs tuikit.Values
+	vs.Set("name", c.Name)
+	vs.Set("body", "Préfère le matin.")
+	m.done(tuikit.DoneMsg{ID: "edit", Values: vs})
+	if c, _ := s.Get("AC"); c == nil || c.Body != "Préfère le matin." || c.Name == "" {
+		t.Fatalf("body not saved from the form: %+v (%s)", c, m.status)
 	}
 }
 

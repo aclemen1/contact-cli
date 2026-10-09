@@ -5,6 +5,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -36,9 +37,18 @@ func init() {
 				return nil, err
 			}
 			m := New(ctx.Config, spheres)
-			m.reload()
-			_, err = tea.NewProgram(m).Run()
-			return spec.Streamed{}, err
+			m.cfg = cfg
+			m.statePath = statePath()
+			m.exe = self()
+			m.exeStamp, m.build = binStamp(m.exe), buildLabel(m.exe)
+			if v := os.Getenv(reloadedEnv); v != "" {
+				os.Unsetenv(reloadedEnv)
+				m.restore()
+				m.say("rechargé "+v, false)
+			} else {
+				m.reload()
+			}
+			return spec.Streamed{}, run(m)
 		},
 	})
 }
@@ -71,13 +81,20 @@ type Model struct {
 	w, h     int
 	modal    *tuikit.Modal
 	editing  string // alias of the card a modal works on
+	cfg      *config.Config
+
+	// exe is the running binary and exeStamp its mtime and inode; build labels it.
+	// newBin: a rebuild waits for the TUI to be idle; reexec: quit to run it.
+	exe, exeStamp, build string
+	newBin, reexec       bool
+	statePath            string
 }
 
 func New(cfgPath string, spheres []string) *Model {
 	return &Model{cfgPath: cfgPath, spheres: spheres, w: 100, h: 30}
 }
 
-func (m *Model) Init() tea.Cmd { return nil }
+func (m *Model) Init() tea.Cmd { return m.watch() }
 
 // call runs an action as the CLI would.
 func (m *Model) call(name string, args map[string]any) (any, error) {
@@ -168,6 +185,19 @@ func (m *Model) loadShown() {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case reloadMsg:
+		m.newBin = true
+		return m, m.maybeReload()
+	case watchMsg:
+		if msg.bin != "" && m.exeStamp != "" && msg.bin != m.exeStamp {
+			m.newBin = true
+		}
+		if cmd := m.maybeReload(); cmd != nil {
+			return m, cmd
+		}
+		return m, m.watch()
+	}
 	if m.modal.Open() {
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.w, m.h = ws.Width, ws.Height
@@ -178,9 +208,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 	case tuikit.DoneMsg:
-		return m, m.done(msg)
+		return m, tea.Batch(m.done(msg), m.maybeReload())
 	case tuikit.CancelMsg:
 		m.say("annulé", false)
+		return m, m.maybeReload()
 	case tea.KeyPressMsg:
 		return m, m.key(msg.String())
 	}
@@ -245,14 +276,22 @@ func (m *Model) key(k string) tea.Cmd {
 		return m.open("Synchroniser avec le carnet d'adresses ?", tuikit.NewConfirm("sync", "Écrire dans le carnet d'adresses les changements des fiches ?"))
 	case "c", "n":
 		return m.openAdd()
-	case "E":
+	case "e":
 		if c != nil {
 			return m.openEdit(c)
+		}
+	case "E":
+		if c != nil {
+			m.editing = c.Alias
+			return m.open("Corps de "+c.Alias, tuikit.NewEditor("body", "Notes libres (jamais envoyées au carnet d'adresses)", c.Body))
 		}
 	case "N":
 		if c != nil {
 			m.editing = c.Alias
-			return m.open("Notes de "+c.Alias, tuikit.NewEditor("notes", "", c.Body))
+			if m.cfg == nil || len(m.cfg.Notes.Add) == 0 {
+				return m.open("Corps de "+c.Alias, tuikit.NewEditor("body", "Notes libres (pas de notes.add dans la configuration)", c.Body))
+			}
+			return m.open("Note de suivi · "+c.Alias, tuikit.NewEditor("note", "Note de suivi", ""))
 		}
 	case "M":
 		if c != nil && c.Kind == store.Group {
@@ -389,10 +428,20 @@ func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 			m.reload()
 			m.say("fiche "+m.editing+" modifiée", false)
 		}
-	case "notes":
-		if _, err = m.call("edit", map[string]any{"alias": m.editing, "body": v.String("notes")}); err == nil {
+	case "body":
+		if _, err = m.call("edit", map[string]any{"alias": m.editing, "body": v.String("body")}); err == nil {
 			m.reload()
-			m.say("notes de "+m.editing+" enregistrées", false)
+			m.say("corps de "+m.editing+" enregistré", false)
+		}
+	case "note":
+		text := strings.TrimSpace(v.String("note"))
+		if text == "" {
+			m.say("note vide : rien n'est ajouté", false)
+			return nil
+		}
+		if _, err = m.call("note", map[string]any{"alias": m.editing, "text": text}); err == nil {
+			m.reload()
+			m.say("note ajoutée à "+m.editing, false)
 		}
 	case "members":
 		cur := m.byAlias(m.editing)
@@ -469,7 +518,7 @@ func kindName(k string) string {
 	return "toutes"
 }
 
-const help = "j/k bouger · gg/G début/fin · entrée détail · esc retour · / filtrer · 1-4 sorte · s sphère · c nouvelle · E modifier · N notes · M membres · # supprimer · R synchroniser · r relire · q quitter"
+const help = "j/k bouger · gg/G début/fin · entrée détail · esc retour · / filtrer · 1-4 sorte · s sphère · c nouvelle · e modifier · E corps · N note de suivi · M membres · # supprimer · R synchroniser · r relire · q quitter"
 
 func (m *Model) View() tea.View {
 	v := tea.NewView(tuikit.Overlay(m.render(), m.modal, m.w, m.h))
@@ -481,6 +530,12 @@ func (m *Model) render() string {
 	header := sTitle.Render("contact") + sMuted.Render(fmt.Sprintf("  %d fiche(s) · sorte %s · sphère %s", len(m.items), kindName(kinds[m.kind]), m.sphereName()))
 	if m.filter != "" {
 		header += sMuted.Render(" · filtre « " + m.filter + " »")
+	}
+	if m.build != "" {
+		header += "  " + sMuted.Render(m.build)
+	}
+	if m.newBin {
+		header += " " + sError.Render("● nouvelle version")
 	}
 	bodyH := max(3, m.h-4)
 	leftW := min(48, m.w/2)
@@ -558,6 +613,16 @@ func (m *Model) detail(width int) []string {
 		}
 	}
 	if m.full && m.shown != nil {
+		if len(m.shown.Notes) > 0 {
+			out = append(out, "", sSection.Render("Notes"))
+			for _, n := range m.shown.Notes {
+				lines := strings.Split(strings.TrimSpace(n.Body), "\n")
+				out = append(out, truncate(sMuted.Render(shortDate(n.Created)+"  ")+lines[0], width))
+				for _, l := range lines[1:] {
+					out = append(out, truncate("            "+l, width))
+				}
+			}
+		}
 		for _, v := range m.shown.Views {
 			out = append(out, "", sSection.Render(v.Label))
 			if v.Error != "" {
@@ -599,4 +664,12 @@ func contains(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// shortDate shows the day of an RFC 3339 time.
+func shortDate(t string) string {
+	if len(t) >= 10 {
+		return t[8:10] + "." + t[5:7] + "." + t[0:4]
+	}
+	return t
 }

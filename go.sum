@@ -8,6 +8,8 @@ github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
 github.com/aclemen1/tuikit v0.2.0 h1:N2UlJjLSi3U22oXtd3vB3FnPhbcR9SIiOxb6+HC76es=
 github.com/aclemen1/tuikit v0.2.0/go.mod h1:RkcS5VCvTZLNdYzAIDDZFxIWB/kWJTdCa4+h1tmQVyQ=
+github.com/aclemen1/tuikit v0.4.0 h1:cKty0pmZx8fsWSidEMVveepKdTGToW0Szlil2wQlJ4E=
+github.com/aclemen1/tuikit v0.4.0/go.mod h1:RkcS5VCvTZLNdYzAIDDZFxIWB/kWJTdCa4+h1tmQVyQ=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
 github.com/atotto/clipboard v0.1.4/go.mod h1:ZY9tmq7sm5xIbd9bOK4onWV4S6X0u6GY7Vn0Yu86PYI=
 github.com/aymanbagabas/go-udiff v0.4.1 h1:OEIrQ8maEeDBXQDoGCbbTTXYJMYRCRO1fnodZ12Gv5o=

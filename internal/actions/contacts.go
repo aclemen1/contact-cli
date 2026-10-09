@@ -859,6 +859,7 @@ type viewOut struct {
 type Shown struct {
 	Contact *store.Contact   `json:"contact"`
 	Members []*store.Contact `json:"members,omitempty"`
+	Notes   []NoteEntry      `json:"notes,omitempty"`
 	Views   []ViewResult     `json:"views,omitempty"`
 }
 
@@ -880,6 +881,11 @@ func runShow(ctx *spec.Context) (any, error) {
 		}
 	}
 	if !ctx.Bool("no-views") {
+		notes, err := NotesOf(cfg, c)
+		if err != nil {
+			ctx.Warn("notes: " + err.Error())
+		}
+		out.Notes = notes
 		for _, v := range cfg.Views {
 			r := mergeView(v, c.AllAliases())
 			if r.Error != "" {
@@ -1012,6 +1018,12 @@ func textShow(w io.Writer, res any) {
 	if c.Body != "" {
 		fmt.Fprintf(w, "\n%s\n", c.Body)
 	}
+	if len(s.Notes) > 0 {
+		fmt.Fprintln(w, "\nNotes:")
+		for _, n := range s.Notes {
+			fmt.Fprintf(w, "  %s  %s\n", noteDate(n.Created), strings.ReplaceAll(strings.TrimSpace(n.Body), "\n", "\n    "))
+		}
+	}
 	for _, v := range s.Views {
 		fmt.Fprintf(w, "\n%s:\n", v.Label)
 		if v.Error != "" {
@@ -1139,4 +1151,12 @@ func runResolve(ctx *spec.Context) (any, error) {
 		}
 	}
 	return out, nil
+}
+
+// noteDate shortens an RFC 3339 time to its day.
+func noteDate(t string) string {
+	if d, err := time.Parse(time.RFC3339, t); err == nil {
+		return d.Format("02.01.2006")
+	}
+	return t
 }

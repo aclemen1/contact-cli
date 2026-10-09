@@ -19,8 +19,15 @@ type Config struct {
 	Hooks    []Hook            `yaml:"hooks,omitempty"`
 	// Views are the commands whose output show adds under a card: what cites it elsewhere.
 	Views []View `yaml:"views,omitempty"`
+	// Notes are kept by another tool: add reads the text on stdin, ls writes JSON; {ref} is contact:<alias>, {sphere}, {by}.
+	Notes Notes `yaml:"notes,omitempty"`
 
 	path string
+}
+
+type Notes struct {
+	Add []string `yaml:"add,omitempty"`
+	Ls  []string `yaml:"ls,omitempty"`
 }
 
 // Hook runs a command after an event of a card; the event comes as JSON on stdin.

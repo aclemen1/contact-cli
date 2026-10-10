@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/aclemen1/tuikit"
 	"github.com/aclemen1/tuikit/complete"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/aclemen1/contact-cli/internal/actions"
 	"github.com/aclemen1/contact-cli/internal/book"
@@ -100,22 +102,30 @@ type Model struct {
 	exe, exeStamp, build string
 	newBin, reexec       bool
 	statePath            string
+
+	// busy shows the background jobs; after carries what an ended job does
+	// to the model, applied in Update. initCmd is run at Init.
+	busy    *tuikit.Busy
+	after   chan func(*Model) tea.Cmd
+	initCmd tea.Cmd
 }
 
 func New(cfgPath string, spheres []string) *Model {
-	return &Model{cfgPath: cfgPath, spheres: spheres, w: 100, h: 30}
+	return &Model{cfgPath: cfgPath, spheres: spheres, w: 100, h: 30,
+		busy: tuikit.NewBusy(), after: make(chan func(*Model) tea.Cmd, 64)}
 }
 
-func (m *Model) Init() tea.Cmd { return m.watch() }
+func (m *Model) Init() tea.Cmd { return tea.Batch(m.watch(), m.initCmd) }
 
-// call runs an action as the CLI would.
-func (m *Model) call(name string, args map[string]any) (any, error) {
+// runAction runs an action as the CLI would, with its warnings; it touches no
+// model, so that a job can call it.
+func runAction(cfgPath, name string, args map[string]any) (any, []string, error) {
 	a := spec.Find("contact", name)
 	if a == nil {
 		a = spec.Find("sync", name)
 	}
 	if a == nil {
-		return nil, fmt.Errorf("no action %s", name)
+		return nil, nil, fmt.Errorf("no action %s", name)
 	}
 	full := map[string]any{}
 	for _, p := range a.Params {
@@ -126,27 +136,127 @@ func (m *Model) call(name string, args map[string]any) (any, error) {
 	for k, v := range args {
 		full[k] = v
 	}
-	ctx := &spec.Context{Args: full, Config: m.cfgPath, Format: "json"}
+	ctx := &spec.Context{Args: full, Config: cfgPath, Format: "json"}
 	res, err := a.Run(ctx)
-	if err == nil && len(ctx.Warnings) > 0 {
-		m.say(strings.Join(ctx.Warnings, " · "), true)
+	return res, ctx.Warnings, err
+}
+
+// call runs an action in the loop of the TUI, its warnings in the status.
+func (m *Model) call(name string, args map[string]any) (any, error) {
+	res, warns, err := runAction(m.cfgPath, name, args)
+	if err == nil && len(warns) > 0 {
+		m.say(strings.Join(warns, " · "), true)
 	}
 	return res, err
 }
 
+// job runs fn under Busy with label. fn returns the text of the end, what to
+// do to the model once ended, and its warnings, which make the job a failure
+// (then is still applied).
+func (m *Model) job(label string, fn func() (string, func(*Model) tea.Cmd, []string, error)) tea.Cmd {
+	after := m.after
+	return m.busy.Run(label, func() (string, error) {
+		text, then, warns, err := fn()
+		if then != nil {
+			after <- then
+		}
+		if err == nil && len(warns) > 0 {
+			err = errors.New(strings.Join(warns, "\n"))
+		}
+		return text, err
+	})
+}
+
+// act runs a write action as a job; once ended, it reads the cards again,
+// calls more, and reads again the card shown. {alias} in text is the alias of
+// the card the action returns.
+func (m *Model) act(label, name string, args map[string]any, text string, more func(*Model, any)) tea.Cmd {
+	cfgPath := m.cfgPath
+	return m.job(label, func() (string, func(*Model) tea.Cmd, []string, error) {
+		res, warns, err := runAction(cfgPath, name, args)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		if c, ok := res.(*store.Contact); ok {
+			text = strings.ReplaceAll(text, "{alias}", c.Alias)
+		}
+		return text, func(m *Model) tea.Cmd {
+			m.list()
+			if more != nil {
+				more(m, res)
+			}
+			if m.full {
+				return m.loadShown()
+			}
+			return nil
+		}, warns, nil
+	})
+}
+
+// drain applies what the ended jobs left.
+func (m *Model) drain() tea.Cmd {
+	var cmds []tea.Cmd
+	for {
+		select {
+		case then := <-m.after:
+			cmds = append(cmds, then(m))
+		default:
+			return tea.Batch(cmds...)
+		}
+	}
+}
+
 func (m *Model) say(s string, isErr bool) { m.status, m.statusE = s, isErr }
 
-func (m *Model) reload() {
+// reload reads the cards again; with a card shown, it reads it again too.
+func (m *Model) reload() tea.Cmd {
+	m.list()
+	if m.full {
+		return m.loadShown()
+	}
+	return nil
+}
+
+// relire reads the cards again under Busy (r).
+func (m *Model) relire() tea.Cmd {
+	cfgPath, args := m.cfgPath, m.lsArgs()
+	return m.job("relecture", func() (string, func(*Model) tea.Cmd, []string, error) {
+		res, warns, err := runAction(cfgPath, "ls", args)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		all := res.([]*store.Contact)
+		return fmt.Sprintf("%d fiche(s) relue(s)", len(all)), func(m *Model) tea.Cmd {
+			m.setAll(all)
+			if m.full {
+				return m.loadShown()
+			}
+			return nil
+		}, warns, nil
+	})
+}
+
+func (m *Model) lsArgs() map[string]any {
 	args := map[string]any{}
 	if m.sphere > 0 {
 		args["sphere"] = m.spheres[m.sphere-1]
 	}
-	res, err := m.call("ls", args)
+	return args
+}
+
+// list reads the cards of the spheres shown and filters them.
+func (m *Model) list() {
+	res, err := m.call("ls", m.lsArgs())
 	if err != nil {
 		m.say(err.Error(), true)
 		return
 	}
-	m.all = res.([]*store.Contact)
+	m.setAll(res.([]*store.Contact))
+}
+
+// setAll keeps the cards read and filters them, keeping the selection.
+func (m *Model) setAll(all []*store.Contact) {
+	m.all = all
 	var keep []*store.Contact
 	for _, c := range m.all {
 		if !contains(m.spheres, c.Sphere) {
@@ -170,9 +280,6 @@ func (m *Model) reload() {
 			}
 		}
 	}
-	if m.full {
-		m.loadShown()
-	}
 }
 
 func (m *Model) current() *store.Contact {
@@ -182,22 +289,72 @@ func (m *Model) current() *store.Contact {
 	return m.items[m.sel]
 }
 
-func (m *Model) loadShown() {
+// shownMsg is a card read again quietly.
+type shownMsg struct {
+	alias string
+	shown *actions.Shown
+	warns []string
+	err   error
+}
+
+// loadShown reads the selected card with its notes and views. A card read
+// for the first time goes under Busy; the card already shown is read again
+// quietly.
+func (m *Model) loadShown() tea.Cmd {
 	c := m.current()
 	if c == nil {
 		m.shown = nil
-		return
+		return nil
 	}
-	res, err := m.call("show", map[string]any{"alias": c.Alias})
-	if err != nil {
-		m.say(err.Error(), true)
-		return
+	alias, cfgPath := c.Alias, m.cfgPath
+	read := func() (*actions.Shown, []string, error) {
+		res, warns, err := runAction(cfgPath, "show", map[string]any{"alias": alias})
+		if err != nil {
+			return nil, nil, err
+		}
+		return res.(*actions.Shown), warns, nil
 	}
-	m.shown = res.(*actions.Shown)
+	if m.shown != nil && m.shown.Contact.Alias == alias {
+		return func() tea.Msg {
+			s, warns, err := read()
+			return shownMsg{alias, s, warns, err}
+		}
+	}
+	return m.job("fiche "+alias, func() (string, func(*Model) tea.Cmd, []string, error) {
+		s, warns, err := read()
+		if err != nil {
+			return "", nil, nil, err
+		}
+		text := "fiche " + alias
+		if n := len(s.Notes); n > 0 {
+			text += fmt.Sprintf(" · %d note(s)", n)
+		}
+		return text, func(m *Model) tea.Cmd { m.setShown(alias, s); return nil }, warns, nil
+	})
+}
+
+// setShown keeps a card read if it is still the one selected.
+func (m *Model) setShown(alias string, s *actions.Shown) {
+	if c := m.current(); m.full && c != nil && c.Alias == alias {
+		m.shown = s
+	}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if cmd, ok := m.busy.Update(msg); ok {
+		return m, tea.Batch(cmd, m.drain(), m.maybeReload())
+	}
 	switch msg := msg.(type) {
+	case shownMsg:
+		if msg.err != nil {
+			m.say(msg.err.Error(), true)
+			return m, nil
+		}
+		if len(msg.warns) > 0 {
+			m.say(strings.Join(msg.warns, " · "), true)
+		}
+		m.setShown(msg.alias, msg.shown)
+		return m, nil
 	case reloadMsg:
 		m.newBin = true
 		return m, m.maybeReload()
@@ -240,8 +397,7 @@ func (m *Model) key(k string) tea.Cmd {
 	if m.pendingG {
 		m.pendingG = false
 		if k == "g" {
-			m.sel = 0
-			return nil
+			return m.move(-m.sel)
 		}
 	}
 	c := m.current()
@@ -251,39 +407,42 @@ func (m *Model) key(k string) tea.Cmd {
 	case "?":
 		m.helpOn = !m.helpOn
 	case "up", "k":
-		m.move(-1)
+		return m.move(-1)
 	case "down", "j":
-		m.move(1)
+		return m.move(1)
 	case "g":
 		m.pendingG = true
 	case "home":
-		m.sel = 0
+		return m.move(-m.sel)
 	case "end", "G":
-		m.sel = max(0, len(m.items)-1)
+		return m.move(len(m.items) - 1 - m.sel)
 	case "ctrl+d", "pgdown":
-		m.move(max(1, m.h/2))
+		return m.move(max(1, m.h/2))
 	case "ctrl+u", "pgup":
-		m.move(-max(1, m.h/2))
+		return m.move(-max(1, m.h/2))
 	case "enter", "l", "right":
 		if c != nil {
 			m.full = true
-			m.loadShown()
+			return m.loadShown()
 		}
 	case "esc", "h", "left":
 		m.full, m.shown = false, nil
 	case "1", "2", "3", "4":
 		m.kind = int(k[0] - '1')
-		m.reload()
+		cmd := m.reload()
 		m.say("sorte : "+kindName(kinds[m.kind]), false)
+		return cmd
 	case "s":
 		m.sphere = (m.sphere + 1) % (len(m.spheres) + 1)
-		m.reload()
+		cmd := m.reload()
 		m.say("sphère : "+m.sphereName(), false)
+		return cmd
 	case "/":
 		return m.open("Filtrer", tuikit.NewForm("filter", tuikit.Text("q", "Texte").Default(m.filter).Help("alias, nom, organisation ou tag ; vide pour tout voir")))
 	case "r", "u":
-		m.reload()
-		m.say("relu", false)
+		return m.relire()
+	case tuikit.BusyKey:
+		return m.open("Travaux", m.busy.List())
 	case "R":
 		return m.open("Synchroniser avec le carnet d'adresses ?", tuikit.NewConfirm("sync", "Écrire dans le carnet d'adresses les changements des fiches ?"))
 	case "c", "n":
@@ -316,14 +475,16 @@ func (m *Model) key(k string) tea.Cmd {
 	return nil
 }
 
-func (m *Model) move(d int) {
+func (m *Model) move(d int) tea.Cmd {
 	if len(m.items) == 0 {
-		return
+		return nil
 	}
+	old := m.sel
 	m.sel = min(len(m.items)-1, max(0, m.sel+d))
-	if m.full {
-		m.loadShown()
+	if m.full && m.sel != old {
+		return m.loadShown()
 	}
+	return nil
 }
 
 func (m *Model) complete(q string) []tuikit.Item {
@@ -414,7 +575,7 @@ func (m *Model) openAdd() tea.Cmd {
 }
 
 // saveEdit writes the edit form; refs come apart since a Refs field holds a list.
-func (m *Model) saveEdit(v tuikit.Values, refs []string) error {
+func (m *Model) saveEdit(v tuikit.Values, refs []string) tea.Cmd {
 	args := map[string]any{"alias": m.editing, "name": v.String("name"), "org": orNone(v.String("org")),
 		"phone": split(v.String("phones")), "email": split(v.String("emails")), "body": v.String("body")}
 	if cur := m.byAlias(m.editing); cur != nil {
@@ -422,12 +583,7 @@ func (m *Model) saveEdit(v tuikit.Values, refs []string) error {
 		args["add-tag"], args["rm-tag"] = minus(tags, cur.Tags), minus(cur.Tags, tags)
 		args["add-ref"], args["rm-ref"] = minus(refs, cur.Refs), minus(cur.Refs, refs)
 	}
-	if _, err := m.call("edit", args); err != nil {
-		return err
-	}
-	m.reload()
-	m.say("fiche "+m.editing+" modifiée", false)
-	return nil
+	return m.act("modifier "+m.editing, "edit", args, "fiche "+m.editing+" modifiée", nil)
 }
 
 func (m *Model) openEdit(c *store.Contact) tea.Cmd {
@@ -457,18 +613,22 @@ func split(s string) []string {
 
 func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 	v := msg.Values
-	var err error
+	alias := m.editing
 	switch msg.ID {
 	case "filter":
 		m.filter = v.String("q")
-		m.reload()
-		return nil
+		return m.reload()
 	case "sync":
-		var res any
-		if res, err = m.call("contacts", nil); err == nil {
-			m.reload()
-			m.say(fmt.Sprintf("carnet synchronisé : %d changement(s)", len(res.(*csync.Report).Changes)), false)
-		}
+		cfgPath := m.cfgPath
+		return m.job("synchroniser le carnet", func() (string, func(*Model) tea.Cmd, []string, error) {
+			res, warns, err := runAction(cfgPath, "contacts", nil)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			rep := res.(*csync.Report)
+			return fmt.Sprintf("carnet synchronisé : %d changement(s), %d lu(s)", len(rep.Changes), rep.Read),
+				func(m *Model) tea.Cmd { return m.reload() }, warns, nil
+		})
 	case "add":
 		args := map[string]any{"name": v.String("name"), "kind": v.String("kind"), "sphere": v.String("sphere"),
 			"phone": split(v.String("phones")), "email": split(v.String("emails")), "tag": split(v.String("tags")),
@@ -479,43 +639,28 @@ func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 		if o := v.String("org"); o != "" {
 			args["org"] = o
 		}
-		var res any
-		if res, err = m.call("add", args); err == nil {
-			c := res.(*store.Contact)
-			m.reload()
-			m.selectAlias(c.Alias)
-			m.say("fiche "+c.Alias+" créée", false)
-		}
+		return m.act("créer la fiche "+v.String("name"), "add", args, "fiche {alias} créée", func(m *Model, res any) {
+			m.selectAlias(res.(*store.Contact).Alias)
+		})
 	case "edit":
-		err = m.saveEdit(v, v.Strings("refs"))
+		return m.saveEdit(v, v.Strings("refs"))
 	case "note":
 		text := strings.TrimSpace(v.String("note"))
 		if text == "" {
 			m.say("note vide : rien n'est ajouté", false)
 			return nil
 		}
-		if _, err = m.call("note", map[string]any{"alias": m.editing, "text": text}); err == nil {
-			m.reload()
-			m.say("note ajoutée à "+m.editing, false)
-		}
+		return m.act("note sur "+alias, "note", map[string]any{"alias": alias, "text": text}, "note ajoutée à "+alias, nil)
 	case "members":
-		cur := m.byAlias(m.editing)
-		if cur != nil {
+		if cur := m.byAlias(alias); cur != nil {
 			want := v.Strings("members")
-			if _, err = m.call("edit", map[string]any{"alias": m.editing, "add-member": minus(want, cur.Members), "rm-member": minus(cur.Members, want)}); err == nil {
-				m.reload()
-				m.say("membres de "+m.editing+" enregistrés", false)
-			}
+			return m.act("membres de "+alias, "edit", map[string]any{"alias": alias, "add-member": minus(want, cur.Members), "rm-member": minus(cur.Members, want)},
+				"membres de "+alias+" enregistrés", nil)
 		}
 	case "rm":
-		if _, err = m.call("rm", map[string]any{"alias": m.editing, "force": true}); err == nil {
+		return m.act("supprimer "+alias, "rm", map[string]any{"alias": alias, "force": true}, "fiche "+alias+" supprimée", func(m *Model, _ any) {
 			m.full, m.shown = false, nil
-			m.reload()
-			m.say("fiche "+m.editing+" supprimée", false)
-		}
-	}
-	if err != nil {
-		m.say(err.Error(), true)
+		})
 	}
 	return nil
 }
@@ -590,7 +735,7 @@ func kindName(k string) string {
 	return "toutes"
 }
 
-const help = "j/k bouger · gg/G début/fin · entrée détail · esc retour · / filtrer · 1-4 sorte · s sphère · c nouvelle · E modifier · N note de suivi · M membres · # supprimer · R synchroniser · r relire · q quitter"
+const help = "j/k bouger · gg/G début/fin · entrée détail · esc retour · / filtrer · 1-4 sorte · s sphère · c nouvelle · E modifier · N note de suivi · M membres · # supprimer · R synchroniser · r relire · ! travaux · q quitter"
 
 func (m *Model) View() tea.View {
 	v := tea.NewView(tuikit.Overlay(m.render(), m.modal, m.w, m.h))
@@ -608,6 +753,10 @@ func (m *Model) render() string {
 	}
 	if m.newBin {
 		header += " " + sError.Render("● nouvelle version")
+	}
+	if b := m.busy.View(); b != "" {
+		b = ansi.Truncate(b, max(10, m.w-lipgloss.Width(header)-3), "…")
+		header += strings.Repeat(" ", max(3, m.w-lipgloss.Width(header)-lipgloss.Width(b))) + b
 	}
 	bodyH := max(3, m.h-4)
 	leftW := min(48, m.w/2)
@@ -628,6 +777,9 @@ func (m *Model) render() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(leftW).Height(bodyH).Render(strings.Join(left, "\n")), " │ ",
 		lipgloss.NewStyle().Height(bodyH).MaxHeight(bodyH).Render(strings.Join(right, "\n")))
 	foot := sMuted.Render("? aide")
+	if m.busy.Unread() > 0 {
+		foot = sMuted.Render(tuikit.BusyKey + " voir l'échec · ? aide")
+	}
 	if m.helpOn {
 		foot = sMuted.Render(help)
 	}
@@ -656,8 +808,12 @@ func (m *Model) detail(width int) []string {
 	if c == nil {
 		return nil
 	}
-	if m.full && m.shown != nil && m.shown.Contact.Alias == c.Alias {
-		c = m.shown.Contact
+	shown := m.shown
+	if shown != nil && shown.Contact.Alias != c.Alias {
+		shown = nil // the card selected is being read
+	}
+	if m.full && shown != nil {
+		c = shown.Contact
 	}
 	out := []string{sTitle.Render(c.Alias+" · "+c.Name) + sMuted.Render("  "+c.Kind+" · "+c.Sphere), ""}
 	row := func(label, v string) {
@@ -684,10 +840,10 @@ func (m *Model) detail(width int) []string {
 			out = append(out, truncate(l, width))
 		}
 	}
-	if m.full && m.shown != nil {
-		if len(m.shown.Notes) > 0 {
+	if m.full && shown != nil {
+		if len(shown.Notes) > 0 {
 			out = append(out, "", sSection.Render("Notes"))
-			for _, n := range m.shown.Notes {
+			for _, n := range shown.Notes {
 				lines := strings.Split(strings.TrimSpace(n.Body), "\n")
 				out = append(out, truncate(sMuted.Render(shortDate(n.Created)+"  ")+lines[0], width))
 				for _, l := range lines[1:] {
@@ -695,7 +851,7 @@ func (m *Model) detail(width int) []string {
 				}
 			}
 		}
-		for _, v := range m.shown.Views {
+		for _, v := range shown.Views {
 			out = append(out, "", sSection.Render(v.Label))
 			if v.Error != "" {
 				out = append(out, sError.Render(truncate(v.Error, width)))

@@ -71,8 +71,9 @@ func (m *Model) watch() tea.Cmd {
 	return tea.Tick(watchEvery, func(time.Time) tea.Msg { return watchMsg{binStamp(exe)} })
 }
 
-// idle is true when no modal is open: nothing is being typed or picked.
-func (m *Model) idle() bool { return !m.modal.Open() }
+// idle is true when no modal is open and no job runs: nothing is being typed,
+// picked or written.
+func (m *Model) idle() bool { return !m.modal.Open() && m.busy.Running() == 0 }
 
 // maybeReload quits for a re-exec once a new binary waits and the TUI is idle.
 func (m *Model) maybeReload() tea.Cmd {
@@ -133,7 +134,7 @@ func (m *Model) restore() {
 	m.selectAlias(s.Alias)
 	if s.Full && m.current() != nil {
 		m.full = true
-		m.loadShown()
+		m.initCmd = m.loadShown() // run at Init
 	}
 }
 

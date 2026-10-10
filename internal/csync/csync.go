@@ -336,7 +336,7 @@ func (y *Sync) Run() (*Report, error) {
 			return nil, err
 		}
 		for _, c := range cs {
-			if cards[c.Alias] != nil {
+			if cards[c.Alias] != nil || c.Local {
 				continue
 			}
 			cards[c.Alias], owner[c.Alias] = c, y.Stores[n]

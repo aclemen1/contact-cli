@@ -346,3 +346,15 @@ func TestAdoptedCardEditWins(t *testing.T) {
 		t.Fatalf("card org = %q", got)
 	}
 }
+
+func TestLocalCardNotSynced(t *testing.T) {
+	y, f, s := setup(t)
+	save(t, s, &store.Contact{Alias: "UNIL", Kind: store.Organisation, Name: "Université de Lausanne", Local: true})
+	run(t, y)
+	if len(f.writes) != 0 {
+		t.Fatalf("a local card must not reach the address book: %v", f.writes)
+	}
+	if get(t, s, "UNIL").Remote != "" {
+		t.Fatal("a local card stays unlinked")
+	}
+}

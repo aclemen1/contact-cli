@@ -95,6 +95,7 @@ func registerContacts() {
 			{Name: "body", Kind: spec.String, Help: "Replace the free notes."},
 			{Name: "append", Kind: spec.String, Help: "Add a paragraph to the free notes."},
 			{Name: "remote", Kind: spec.String, Help: "Address-book id to link; none unlinks."},
+			{Name: "local", Kind: spec.String, Enum: []string{"true", "false"}, Help: "true keeps the card out of the address-book sync; false syncs it again."},
 		},
 		Effects:  []string{"Rewrites the card and commits it; joining or leaving a group rewrites the group.", "--primary renames the file and rewrites the groups naming the old main alias, one commit per store.", "Fires the updated hooks."},
 		Examples: []string{"contact edit JMR --add-phone mobile:+41 79 000 00 00", "contact edit FAM --add-member TAC", "contact edit JC --add-tag jeannette --add-group FAM", "contact edit EC --add-alias EVE", "contact edit EC --primary EVE"},
@@ -610,6 +611,12 @@ func runEdit(ctx *spec.Context) (any, error) {
 		set("kind", &cur.Kind, kind, kind != "")
 		_, ok = ctx.Args["remote"]
 		set("remote", &cur.Remote, clearable(ctx.Str("remote")), ok)
+		if v, ok := ctx.Args["local"]; ok {
+			if l := fmt.Sprint(v) == "true"; l != cur.Local {
+				cur.Local = l
+				changed = append(changed, "local")
+			}
+		}
 		_, ok = ctx.Args["body"]
 		set("notes", &cur.Body, ctx.Str("body"), ok)
 		if a := strings.TrimSpace(ctx.Str("append")); a != "" {
@@ -1009,6 +1016,9 @@ func textShow(w io.Writer, res any) {
 	line("tags", strings.Join(c.Tags, ", "))
 	line("refs", strings.Join(c.Refs, ", "))
 	line("remote", c.Remote)
+	if c.Local {
+		line("local", "true (hors carnet d'adresses)")
+	}
 	if len(s.Members) > 0 {
 		fmt.Fprintln(w, "\nMembers:")
 		for _, m := range s.Members {

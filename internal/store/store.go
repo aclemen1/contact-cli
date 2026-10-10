@@ -53,6 +53,8 @@ type Contact struct {
 	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 	// Remote is the address-book card or group the card is synced with.
 	Remote string `yaml:"remote,omitempty" json:"remote,omitempty"`
+	// Local keeps the card out of the address-book sync.
+	Local bool `yaml:"local,omitempty" json:"local,omitempty"`
 	// Phones and Emails are values, or label:value (mobile:+41 79 000 00 00).
 	Phones  []string   `yaml:"phones,omitempty" json:"phones,omitempty"`
 	Emails  []string   `yaml:"emails,omitempty" json:"emails,omitempty"`

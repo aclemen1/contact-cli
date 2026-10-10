@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/aclemen1/tuikit"
+	"github.com/aclemen1/tuikit/complete"
 
 	"github.com/aclemen1/contact-cli/internal/actions"
 	"github.com/aclemen1/contact-cli/internal/book"
@@ -88,6 +89,11 @@ type Model struct {
 	modal    *tuikit.Modal
 	editing  string // alias of the card a modal works on
 	cfg      *config.Config
+
+	// refsC completes the refs from the shared sources, loaded at the first form.
+	refsC     *complete.Completer
+	membersC  *complete.Completer
+	refsTried bool
 
 	// exe is the running binary and exeStamp its mtime and inode; build labels it.
 	// newBin: a rebuild waits for the TUI to be idle; reexec: quit to run it.
@@ -299,7 +305,7 @@ func (m *Model) key(k string) tea.Cmd {
 		if c != nil && c.Kind == store.Group {
 			m.editing = c.Alias
 			return m.open("Membres de "+c.Alias, tuikit.NewForm("members",
-				tuikit.Refs("members", "Membres", m.complete).Default(append([]string{}, c.Members...)).Strict()))
+				tuikit.Refs("members", "Membres", m.memberComplete).Default(append([]string{}, c.Members...)).Strict()))
 		}
 	case "#":
 		if c != nil {
@@ -343,7 +349,66 @@ func (m *Model) groupComplete(q string) []tuikit.Item {
 	return out
 }
 
+// loadSources builds a completer from the named shared sources; a missing or
+// failed source is reported and skipped, and the field is typed freely.
+func (m *Model) loadSources(names []string) *complete.Completer {
+	var srcs []complete.Source
+	var missing []string
+	for _, n := range names {
+		if s, err := complete.Lookup(n); err == nil {
+			srcs = append(srcs, s)
+		} else {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		m.say("complétion indisponible : "+strings.Join(missing, ", "), true)
+	}
+	if len(srcs) == 0 {
+		return nil
+	}
+	return complete.New(srcs...)
+}
+
+func (m *Model) loadCompleters() {
+	if m.refsTried {
+		return
+	}
+	m.refsTried = true
+	if m.cfg != nil {
+		m.refsC = m.loadSources(m.cfg.Complete.Refs)
+		if len(m.cfg.Complete.Members) > 0 {
+			m.membersC = m.loadSources(m.cfg.Complete.Members)
+		}
+	}
+}
+
+func (m *Model) refComplete(q string) []tuikit.Item {
+	m.loadCompleters()
+	if m.refsC == nil {
+		return nil
+	}
+	return m.refsC.Complete(q)
+}
+
+// memberComplete proposes aliases from the configured sources, their <source>:
+// prefix removed, or else from the cards in memory.
+func (m *Model) memberComplete(q string) []tuikit.Item {
+	m.loadCompleters()
+	if m.membersC == nil {
+		return m.complete(q)
+	}
+	out := m.membersC.Complete(q)
+	for k := range out {
+		if _, v, ok := strings.Cut(out[k].Value, ":"); ok {
+			out[k].Value = v
+		}
+	}
+	return out
+}
+
 func (m *Model) openAdd() tea.Cmd {
+	m.loadCompleters()
 	sphere := m.spheres[0]
 	if m.sphere > 0 {
 		sphere = m.spheres[m.sphere-1]
@@ -358,20 +423,39 @@ func (m *Model) openAdd() tea.Cmd {
 		tuikit.Text("emails", "E-mails").Help("séparés par des virgules").ShowIf("kind", store.Person, store.Organisation),
 		tuikit.Text("tags", "Tags").Help("séparés par des virgules"),
 		tuikit.Refs("groups", "Groupes", m.groupComplete).Strict(),
-		tuikit.Refs("members", "Membres", m.complete).Strict().ShowIf("kind", store.Group),
+		tuikit.Refs("members", "Membres", m.memberComplete).Strict().ShowIf("kind", store.Group),
+		tuikit.Refs("refs", "Réfs", m.refComplete).Help("<outil>:<id>"),
 	)
 	return m.open("Nouvelle fiche", f)
 }
 
+// saveEdit writes the edit form; refs come apart since a Refs field holds a list.
+func (m *Model) saveEdit(v tuikit.Values, refs []string) error {
+	args := map[string]any{"alias": m.editing, "name": v.String("name"), "org": orNone(v.String("org")),
+		"phone": split(v.String("phones")), "email": split(v.String("emails")), "body": v.String("body")}
+	if cur := m.byAlias(m.editing); cur != nil {
+		tags := split(v.String("tags"))
+		args["add-tag"], args["rm-tag"] = minus(tags, cur.Tags), minus(cur.Tags, tags)
+		args["add-ref"], args["rm-ref"] = minus(refs, cur.Refs), minus(cur.Refs, refs)
+	}
+	if _, err := m.call("edit", args); err != nil {
+		return err
+	}
+	m.reload()
+	m.say("fiche "+m.editing+" modifiée", false)
+	return nil
+}
+
 func (m *Model) openEdit(c *store.Contact) tea.Cmd {
 	m.editing = c.Alias
+	m.refComplete("")
 	f := tuikit.NewForm("edit",
 		tuikit.Text("name", "Nom").Default(c.Name).Required(),
 		tuikit.Text("org", "Organisation").Default(c.Org),
 		tuikit.Text("phones", "Téléphones").Default(strings.Join(c.Phones, ", ")),
 		tuikit.Text("emails", "E-mails").Default(strings.Join(c.Emails, ", ")),
 		tuikit.Text("tags", "Tags").Default(strings.Join(c.Tags, ", ")),
-		tuikit.Text("refs", "Réfs").Default(strings.Join(c.Refs, ", ")).Help("<outil>:<id>, séparés par des virgules"),
+		tuikit.Refs("refs", "Réfs", m.refComplete).Default(append([]string{}, c.Refs...)).Help("<outil>:<id>"),
 		tuikit.TextArea("body", "Notes libres").Default(c.Body).Help("jamais envoyées au carnet d'adresses"),
 	)
 	return m.open("Modifier "+c.Alias, f)
@@ -404,7 +488,7 @@ func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 	case "add":
 		args := map[string]any{"name": v.String("name"), "kind": v.String("kind"), "sphere": v.String("sphere"),
 			"phone": split(v.String("phones")), "email": split(v.String("emails")), "tag": split(v.String("tags")),
-			"group": v.Strings("groups"), "member": v.Strings("members")}
+			"group": v.Strings("groups"), "member": v.Strings("members"), "ref": v.Strings("refs")}
 		if a := v.String("alias"); a != "" {
 			args["alias"] = a
 		}
@@ -419,18 +503,7 @@ func (m *Model) done(msg tuikit.DoneMsg) tea.Cmd {
 			m.say("fiche "+c.Alias+" créée", false)
 		}
 	case "edit":
-		args := map[string]any{"alias": m.editing, "name": v.String("name"), "org": orNone(v.String("org")),
-			"phone": split(v.String("phones")), "email": split(v.String("emails")), "body": v.String("body")}
-		cur := m.byAlias(m.editing)
-		if cur != nil {
-			tags, refs := split(v.String("tags")), split(v.String("refs"))
-			args["add-tag"], args["rm-tag"] = minus(tags, cur.Tags), minus(cur.Tags, tags)
-			args["add-ref"], args["rm-ref"] = minus(refs, cur.Refs), minus(cur.Refs, refs)
-		}
-		if _, err = m.call("edit", args); err == nil {
-			m.reload()
-			m.say("fiche "+m.editing+" modifiée", false)
-		}
+		err = m.saveEdit(v, v.Strings("refs"))
 	case "note":
 		text := strings.TrimSpace(v.String("note"))
 		if text == "" {

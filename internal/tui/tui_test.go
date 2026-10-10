@@ -187,3 +187,42 @@ func TestPick(t *testing.T) {
 		t.Fatal("unknown alias must not be picked")
 	}
 }
+
+func TestRefsCompletedAndSaved(t *testing.T) {
+	m, s, dir := newTestModel(t)
+	refs := filepath.Join(dir, "refs.yaml")
+	os.WriteFile(refs, []byte("sources:\n  office:\n    prefix: \"office:\"\n    static:\n      - {value: P-0053, label: contact}\n"), 0o644)
+	t.Setenv("TUIKIT_REFS", refs)
+	m.cfg, _ = config.Load(m.cfgPath)
+	m.cfg.Complete.Refs = []string{"office"}
+	if got := m.refComplete("P-005"); len(got) != 1 {
+		t.Fatalf("shared source not used: %v", got)
+	}
+	m.key("E")
+	if !m.modal.Open() {
+		t.Fatal("E opens the edit form")
+	}
+	m.modal = nil
+	c, _ := s.Get("AC")
+	var vs tuikit.Values
+	vs.Set("name", c.Name)
+	if err := m.saveEdit(vs, []string{"office:P-0053"}); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := s.Get("AC"); len(c.Refs) != 1 || c.Refs[0] != "office:P-0053" {
+		t.Fatalf("refs not saved: %+v (%s)", c.Refs, m.status)
+	}
+}
+
+func TestRefsWithoutSources(t *testing.T) {
+	m, _, dir := newTestModel(t)
+	t.Setenv("TUIKIT_REFS", filepath.Join(dir, "absent.yaml"))
+	m.cfg, _ = config.Load(m.cfgPath)
+	m.cfg.Complete.Refs = []string{"office"}
+	if got := m.refComplete("office:"); got != nil {
+		t.Fatalf("no file: nothing proposed, got %v", got)
+	}
+	if !strings.Contains(m.status, "office") {
+		t.Fatalf("missing source not reported: %q", m.status)
+	}
+}

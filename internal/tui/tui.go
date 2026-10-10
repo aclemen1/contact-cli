@@ -349,25 +349,17 @@ func (m *Model) groupComplete(q string) []tuikit.Item {
 	return out
 }
 
-// loadSources builds a completer from the named shared sources; a missing or
-// failed source is reported and skipped, and the field is typed freely.
-func (m *Model) loadSources(names []string) *complete.Completer {
-	var srcs []complete.Source
-	var missing []string
-	for _, n := range names {
-		if s, err := complete.Lookup(n); err == nil {
-			srcs = append(srcs, s)
-		} else {
-			missing = append(missing, n)
-		}
+// loadSources builds a completer from the configured sources of a field; the
+// sources missing from the shared file are reported, the others kept.
+func (m *Model) loadSources(uses complete.Uses) *complete.Completer {
+	if len(uses) == 0 {
+		return nil
 	}
+	c, missing := complete.FromConfig(uses)
 	if len(missing) > 0 {
 		m.say("complétion indisponible : "+strings.Join(missing, ", "), true)
 	}
-	if len(srcs) == 0 {
-		return nil
-	}
-	return complete.New(srcs...)
+	return c
 }
 
 func (m *Model) loadCompleters() {
@@ -376,10 +368,8 @@ func (m *Model) loadCompleters() {
 	}
 	m.refsTried = true
 	if m.cfg != nil {
-		m.refsC = m.loadSources(m.cfg.Complete.Refs)
-		if len(m.cfg.Complete.Members) > 0 {
-			m.membersC = m.loadSources(m.cfg.Complete.Members)
-		}
+		m.refsC = m.loadSources(m.cfg.Complete["refs"])
+		m.membersC = m.loadSources(m.cfg.Complete["members"])
 	}
 }
 
@@ -391,20 +381,14 @@ func (m *Model) refComplete(q string) []tuikit.Item {
 	return m.refsC.Complete(q)
 }
 
-// memberComplete proposes aliases from the configured sources, their <source>:
-// prefix removed, or else from the cards in memory.
+// memberComplete proposes aliases from the configured sources, or else from
+// the cards in memory.
 func (m *Model) memberComplete(q string) []tuikit.Item {
 	m.loadCompleters()
 	if m.membersC == nil {
 		return m.complete(q)
 	}
-	out := m.membersC.Complete(q)
-	for k := range out {
-		if _, v, ok := strings.Cut(out[k].Value, ":"); ok {
-			out[k].Value = v
-		}
-	}
-	return out
+	return m.membersC.Complete(q)
 }
 
 func (m *Model) openAdd() tea.Cmd {

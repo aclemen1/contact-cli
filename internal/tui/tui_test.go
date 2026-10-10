@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/aclemen1/tuikit/complete"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,7 +195,7 @@ func TestRefsCompletedAndSaved(t *testing.T) {
 	os.WriteFile(refs, []byte("sources:\n  office:\n    prefix: \"office:\"\n    static:\n      - {value: P-0053, label: contact}\n"), 0o644)
 	t.Setenv("TUIKIT_REFS", refs)
 	m.cfg, _ = config.Load(m.cfgPath)
-	m.cfg.Complete.Refs = []string{"office"}
+	m.cfg.Complete = map[string]complete.Uses{"refs": {{Source: "office"}}}
 	if got := m.refComplete("P-005"); len(got) != 1 {
 		t.Fatalf("shared source not used: %v", got)
 	}
@@ -218,8 +219,8 @@ func TestRefsWithoutSources(t *testing.T) {
 	m, _, dir := newTestModel(t)
 	t.Setenv("TUIKIT_REFS", filepath.Join(dir, "absent.yaml"))
 	m.cfg, _ = config.Load(m.cfgPath)
-	m.cfg.Complete.Refs = []string{"office"}
-	if got := m.refComplete("office:"); got != nil {
+	m.cfg.Complete = map[string]complete.Uses{"refs": {{Source: "office"}}}
+	if got := m.refComplete("office:"); len(got) != 0 {
 		t.Fatalf("no file: nothing proposed, got %v", got)
 	}
 	if !strings.Contains(m.status, "office") {

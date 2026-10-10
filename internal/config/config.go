@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/aclemen1/tuikit/complete"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,14 +23,9 @@ type Config struct {
 	// Notes are kept by another tool: add reads the text on stdin, ls writes JSON; {ref} is contact:<alias>, {sphere}, {by}.
 	Notes Notes `yaml:"notes,omitempty"`
 	// Complete names, per form field, the shared completion sources of the TUI.
-	Complete Complete `yaml:"complete,omitempty"`
+	Complete map[string]complete.Uses `yaml:"complete,omitempty"`
 
 	path string
-}
-
-type Complete struct {
-	Refs    []string `yaml:"refs,omitempty"`
-	Members []string `yaml:"members,omitempty"`
 }
 
 type Notes struct {
